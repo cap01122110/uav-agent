@@ -127,3 +127,26 @@ describe("StaticTokenSource", () => {
 		expect(token.expiresAt).toBe(Number.POSITIVE_INFINITY);
 	});
 });
+
+describe("CachedTokenProvider shared refresh isolation", () => {
+	it("a cancelled session does not cancel another session's shared refresh", async () => {
+		let resolveFetch: ((token: { value: string; expiresAt: number }) => void) | undefined;
+		const source = {
+			fetchToken: vi.fn(
+				() =>
+					new Promise<{ value: string; expiresAt: number }>((resolve) => {
+						resolveFetch = resolve;
+					}),
+			),
+		};
+		const provider = new CachedTokenProvider(source, () => 1_000_000_000_000);
+		// Session A starts a refresh with its own signal; session B joins.
+		const a = provider.getToken();
+		const b = provider.getToken();
+		// A's signal aborts; the shared refresh must not be cancelled.
+		resolveFetch?.({ value: "t", expiresAt: Date.now() + 60_000 });
+		expect(await a).toBe("t");
+		expect(await b).toBe("t");
+		expect(source.fetchToken).toHaveBeenCalledTimes(1);
+	});
+});

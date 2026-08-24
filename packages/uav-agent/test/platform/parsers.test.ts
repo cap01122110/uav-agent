@@ -51,6 +51,17 @@ describe("parseDroneStatus", () => {
 		expect(status.gps?.altitude).toBe(120);
 	});
 
+	it("does not fabricate coordinates when one axis is missing", () => {
+		expect(parseDroneStatus({ gps: { latitude: 22.82 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ gps: { longitude: 108.32 } }, "SN").gps).toBeUndefined();
+	});
+
+	it("rejects out-of-range coordinates", () => {
+		expect(parseDroneStatus({ gps: { latitude: 120, longitude: 108.32 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ gps: { latitude: 22.82, longitude: 190 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ gps: { latitude: -95, longitude: 0 } }, "SN").gps).toBeUndefined();
+	});
+
 	it("maps flightStatus alias", () => {
 		expect(parseDroneStatus({ flightStatus: "flying" }, "SN").flying).toBe(true);
 		expect(parseDroneStatus({ flightStatus: "landed" }, "SN").flying).toBe(false);
@@ -112,5 +123,15 @@ describe("parsePreflightResult", () => {
 
 	it("honors an explicit passed flag", () => {
 		expect(parsePreflightResult({ passed: true, checks: [] }, "A").passed).toBe(true);
+	});
+
+	it("fails closed on an empty preflight payload", () => {
+		expect(parsePreflightResult({}, "A").passed).toBe(false);
+		expect(parsePreflightResult({ checks: [] }, "A").passed).toBe(false);
+	});
+
+	it("does not fail open when a check lacks a pass marker", () => {
+		const result = parsePreflightResult({ checks: [{ name: "battery" }] }, "A");
+		expect(result.passed).toBe(false);
 	});
 });

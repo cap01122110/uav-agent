@@ -37,8 +37,9 @@ function createClient(transport: MockTransport, token = "tok-1"): HttpPlatformCl
 }
 
 describe("HttpPlatformClient", () => {
-	it("getAirportStatus searches the dock list, injects auth, and parses", async () => {
+	it("resolves a nickname via dock list when the direct SN lookup misses", async () => {
 		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({
 			status: 200,
 			body: envelope({
@@ -61,6 +62,8 @@ describe("HttpPlatformClient", () => {
 				login_time: "2026-08-21 09:48:54",
 			}),
 		});
+		// Second dock detail fails; must not break the nickname lookup.
+		transport.responses.push({ status: 404, body: undefined });
 		const client = createClient(transport);
 
 		const status = await client.airport.getStatus("Test-01");
@@ -70,29 +73,46 @@ describe("HttpPlatformClient", () => {
 		expect(status.droneBinded).toBe(true);
 		expect(status.lastSeenAt).toBe(Date.parse("2026-08-21T09:48:54"));
 
-		expect(transport.calls).toHaveLength(2);
-		const listCall = transport.calls[0];
+		expect(transport.calls.length).toBeGreaterThanOrEqual(3);
+		const listCall = transport.calls[1];
 		expect(listCall.method).toBe("POST");
 		expect(listCall.url).toBe("https://platform/manage/api/v1/workspaces/ws-1/devices/getDockListPageVo");
 		expect(listCall.headers?.["x-auth-token"]).toBe("tok-1");
 		expect(listCall.body).toEqual({ page_num: 1, page_size: 100, workspace_id: "ws-1" });
-		expect(transport.calls[1]?.url).toBe("https://platform/manage/api/v1/workspaces/ws-1/devices/8UUXN7N00A0G5T");
+		expect(transport.calls.some((c) => c.url.endsWith("/devices/8UUXN7N00A0G5T"))).toBe(true);
 	});
 
-	it("matches airports by device SN", async () => {
+	it("matches airports by device SN with a direct detail lookup", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "8UUXN7N00A0G5T", deviceType: 3 }] }),
+			body: envelope({ device_sn: "8UUXN7N00A0G5T", type: 3, nickname: "Test-01" }),
 		});
-		transport.responses.push({ status: 200, body: envelope({ device_sn: "8UUXN7N00A0G5T", nickname: "Test-01" }) });
 		const client = createClient(transport);
 		const status = await client.airport.getStatus("8UUXN7N00A0G5T");
 		expect(status.airportId).toBe("8UUXN7N00A0G5T");
+		expect(transport.calls).toHaveLength(1);
+		expect(transport.calls[0]?.url).toBe("https://platform/manage/api/v1/workspaces/ws-1/devices/8UUXN7N00A0G5T");
+	});
+
+	it("resolve returns the canonical device SN", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
+		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({
+			status: 200,
+			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true }),
+		});
+		const client = createClient(transport);
+		const resolved = await client.airport.resolve("Test-01");
+		expect(resolved.deviceSn).toBe("DOCK1");
+		expect(resolved.name).toBe("Test-01");
+		expect(resolved.online).toBe(true);
 	});
 
 	it("returns AIRPORT_NOT_FOUND when no dock matches", async () => {
 		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({
 			status: 200,
 			body: envelope({ list: [{ deviceSn: "8UUXN7N00A0G5T", deviceType: 3 }] }),
@@ -109,22 +129,11 @@ describe("HttpPlatformClient", () => {
 
 	it("returns AIRPORT_NOT_FOUND when the workspace has no docks", async () => {
 		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
 		const client = createClient(transport);
 		try {
 			await client.airport.getStatus("Test-01");
-			expect.unreachable();
-		} catch (error) {
-			expect((error as PlatformError).code).toBe("AIRPORT_NOT_FOUND");
-		}
-	});
-
-	it("maps HTTP 404 to AIRPORT_NOT_FOUND", async () => {
-		const transport = new MockTransport();
-		transport.responses.push({ status: 404, body: undefined });
-		const client = createClient(transport);
-		try {
-			await client.airport.getStatus("missing");
 			expect.unreachable();
 		} catch (error) {
 			expect((error as PlatformError).code).toBe("AIRPORT_NOT_FOUND");
@@ -160,7 +169,7 @@ describe("HttpPlatformClient", () => {
 		transport.responses.push({ status: 200, body: { code: 50012, message: "设备不存在" } });
 		const client = createClient(transport);
 		try {
-			await client.airport.getStatus("nope");
+			await client.drone.getStatus("nope");
 			expect.unreachable();
 		} catch (error) {
 			expect((error as PlatformError).code).toBe("UNKNOWN_ERROR");
@@ -168,11 +177,11 @@ describe("HttpPlatformClient", () => {
 		}
 	});
 
-	it("getDroneStatus parses gps", async () => {
+	it("getDroneStatus parses device detail", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ online: true, flying: false, gps: { latitude: 1, longitude: 2 } }),
+			body: envelope({ device_sn: "SN-1", type: 100, status: true, gps: { latitude: 1, longitude: 2 } }),
 		});
 		const client = createClient(transport);
 		const status = await client.drone.getStatus("SN-1");
@@ -180,13 +189,37 @@ describe("HttpPlatformClient", () => {
 		expect(status.gps?.longitude).toBe(2);
 	});
 
-	it("preflightCheck combines airport and drone checks", async () => {
+	it("getMissionStatus matches a job by id", async () => {
 		const transport = new MockTransport();
+		transport.responses.push({
+			status: 200,
+			body: envelope({ list: [{ job_id: "J1", status: 3, begin_time: 1_700_000_000 }] }),
+		});
+		const client = createClient(transport);
+		const status = await client.mission.getStatus("J1");
+		expect(status.status).toBe("completed");
+		expect(status.startedAt).toBe(1_700_000_000_000);
+	});
+
+	it("preflightCheck passes when airport is online, idle and drone is bound", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
 		transport.responses.push({
 			status: 200,
-			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true, child_device_sn: "DRONE1" }),
+			body: envelope({
+				device_sn: "DOCK1",
+				nickname: "Test-01",
+				status: true,
+				mode_code: 0,
+				child_device_sn: "DRONE1",
+			}),
 		});
+		transport.responses.push({
+			status: 200,
+			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
+		});
+		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({ device_sn: "DRONE1", status: true, device_name: "Matrice 4TD" }),
@@ -194,35 +227,97 @@ describe("HttpPlatformClient", () => {
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
 		expect(result.passed).toBe(true);
-		expect(result.checks).toHaveLength(3);
-		expect(transport.calls[0]?.method).toBe("POST");
+		expect(result.checks).toHaveLength(4);
 	});
 
-	it("preflightCheck fails when the drone is offline", async () => {
+	it("docked drone offline does not alone fail the preflight check", async () => {
 		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
 		transport.responses.push({
 			status: 200,
-			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true, child_device_sn: "DRONE1" }),
+			body: envelope({
+				device_sn: "DOCK1",
+				nickname: "Test-01",
+				status: true,
+				mode_code: 0,
+				child_device_sn: "DRONE1",
+			}),
 		});
 		transport.responses.push({
 			status: 200,
-			body: envelope({ device_sn: "DRONE1", status: false }),
+			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
 		});
+		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: false }) });
+		const client = createClient(transport);
+		const result = await client.safety.preflightCheck("Test-01");
+		expect(result.passed).toBe(true);
+		const droneCheck = result.checks.find((check) => check.name === "drone_online");
+		expect(droneCheck?.passed).toBe(false);
+		expect(droneCheck?.informational).toBe(true);
+	});
+
+	it("preflightCheck rejects an airport with an active (running) job", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
+		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({
+			status: 200,
+			body: envelope({
+				device_sn: "DOCK1",
+				nickname: "Test-01",
+				status: true,
+				mode_code: 0,
+				child_device_sn: "DRONE1",
+			}),
+		});
+		transport.responses.push({
+			status: 200,
+			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
+		});
+		transport.responses.push({ status: 200, body: envelope({ list: [{ job_id: "J1", status: 1 }] }) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: true }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
 		expect(result.passed).toBe(false);
-		const droneCheck = result.checks.find((check) => check.name === "drone_online");
-		expect(droneCheck?.passed).toBe(false);
+		const idleCheck = result.checks.find((check) => check.name === "airport_idle");
+		expect(idleCheck?.passed).toBe(false);
+	});
+
+	it("preflightCheck fails closed when the airport idle state is unknown", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
+		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({
+			status: 200,
+			body: envelope({
+				device_sn: "DOCK1",
+				nickname: "Test-01",
+				status: true,
+				mode_code: -1,
+				child_device_sn: "DRONE1",
+			}),
+		});
+		transport.responses.push({
+			status: 200,
+			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: -1 }] }),
+		});
+		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: true }) });
+		const client = createClient(transport);
+		const result = await client.safety.preflightCheck("Test-01");
+		expect(result.passed).toBe(false);
+		const idleCheck = result.checks.find((check) => check.name === "airport_idle");
+		expect(idleCheck?.passed).toBe(false);
 	});
 
 	it("propagates abort signals to the transport", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "A", deviceType: 3 }] }),
+			body: envelope({ device_sn: "A", type: 3 }),
 		});
-		transport.responses.push({ status: 200, body: envelope({ device_sn: "A" }) });
 		const client = createClient(transport);
 		const controller = new AbortController();
 		await client.airport.getStatus("A", controller.signal);
@@ -231,11 +326,7 @@ describe("HttpPlatformClient", () => {
 
 	it("passes an abort signal to the token provider", async () => {
 		const transport = new MockTransport();
-		transport.responses.push({
-			status: 200,
-			body: envelope({ list: [{ deviceSn: "A", deviceType: 3 }] }),
-		});
-		transport.responses.push({ status: 200, body: envelope({ device_sn: "A" }) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", type: 3 }) });
 		const getToken = vi.fn(async () => "tok");
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
@@ -250,7 +341,7 @@ describe("HttpPlatformClient", () => {
 
 	it("throws INVALID_REQUEST when no workspace can be resolved", async () => {
 		const transport = new MockTransport();
-		// Workspace list returns nothing usable, so workspace resolution fails.
+		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
 		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
@@ -276,6 +367,7 @@ describe("HttpPlatformClient", () => {
 				],
 			}),
 		});
+		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "A", deviceType: 3 }] }) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", nickname: "A" }) });
 		const client = new HttpPlatformClient({
@@ -285,7 +377,6 @@ describe("HttpPlatformClient", () => {
 		});
 		const status = await client.airport.getStatus("A");
 		expect(status.airportId).toBe("A");
-		// The joined workspace is preferred over the first in the list.
-		expect(transport.calls[1]?.url).toContain("/workspaces/ws-1/devices/getDockListPageVo");
+		expect(transport.calls[2]?.url).toContain("/workspaces/ws-1/devices/getDockListPageVo");
 	});
 });

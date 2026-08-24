@@ -43,6 +43,7 @@ export function createPrepareActionTools(ctx: PrepareActionContext): ToolDefinit
 		label: "Prepare Return Home",
 		description: "创建返航动作并等待用户确认。只注册待确认动作,不会执行任何飞控操作。用户确认后才会执行。",
 		parameters: returnHomeInput,
+		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, extensionCtx) {
 			const action = await ctx.prepareAction(sessionIdOf(extensionCtx), {
 				type: "return_home",
@@ -61,6 +62,7 @@ export function createPrepareActionTools(ctx: PrepareActionContext): ToolDefinit
 		label: "Prepare Point Flight",
 		description: "创建指点飞行动作并等待用户确认。只注册待确认动作,不会执行任何飞控操作。用户确认后才会执行。",
 		parameters: pointFlightInput,
+		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, extensionCtx) {
 			const action = await ctx.prepareAction(sessionIdOf(extensionCtx), {
 				type: "point_flight",
@@ -84,6 +86,7 @@ export function createPrepareActionTools(ctx: PrepareActionContext): ToolDefinit
 		label: "Prepare Start Live",
 		description: "创建开启直播动作并等待用户确认。只注册待确认动作,不会执行任何操作。用户确认后才会执行。",
 		parameters: startLiveInput,
+		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, extensionCtx) {
 			const action = await ctx.prepareAction(sessionIdOf(extensionCtx), {
 				type: "start_live",

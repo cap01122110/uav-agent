@@ -21,11 +21,10 @@ export const STYLES = {
 /** Assistant message that can be updated in place as deltas arrive. */
 class AssistantMessageComponent {
 	private readonly text: Text;
+	private readonly container: Container;
 
-	constructor(
-		private readonly container: Container,
-		content: string,
-	) {
+	constructor(container: Container, content: string) {
+		this.container = container;
 		this.text = new Text(content, 1, 0);
 		this.container.addChild(this.text);
 	}
@@ -39,13 +38,28 @@ export class ChatView {
 	/** Container added to the TUI; messages are appended to it. */
 	readonly container = new Container();
 	private assistant: AssistantMessageComponent | undefined;
+	private assistantBuffer = "";
 
 	addUserMessage(content: string): void {
 		this.assistant = undefined;
+		this.assistantBuffer = "";
 		this.container.addChild(new Text(STYLES.user(`You: ${content}`), 1, 0));
 	}
 
-	updateAssistant(content: string): void {
+	/** Append a streaming delta to the current assistant message. */
+	appendAssistantDelta(delta: string): void {
+		this.assistantBuffer += delta;
+		this.updateAssistant(this.assistantBuffer);
+	}
+
+	/** Replace the assistant message with the final full text. */
+	completeAssistant(content: string): void {
+		this.assistantBuffer = content;
+		this.updateAssistant(content);
+		this.finishAssistant();
+	}
+
+	private updateAssistant(content: string): void {
 		if (this.assistant === undefined) {
 			this.assistant = new AssistantMessageComponent(this.container, content);
 			return;
@@ -53,8 +67,9 @@ export class ChatView {
 		this.assistant.setContent(content);
 	}
 
-	finishAssistant(): void {
+	private finishAssistant(): void {
 		this.assistant = undefined;
+		this.assistantBuffer = "";
 	}
 
 	startTool(toolCallId: string, toolName: string): void {
@@ -78,11 +93,10 @@ export class ChatView {
 	renderEvent(event: UavAgentEvent): void {
 		switch (event.type) {
 			case "message.delta":
-				this.updateAssistant(event.content);
+				this.appendAssistantDelta(event.content);
 				break;
 			case "message.completed":
-				this.updateAssistant(event.content);
-				this.finishAssistant();
+				this.completeAssistant(event.content);
 				break;
 			case "tool.started":
 				this.startTool(event.toolCallId, event.toolName);

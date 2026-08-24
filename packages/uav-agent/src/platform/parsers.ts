@@ -64,10 +64,21 @@ function asFlightStatus(...values: unknown[]): boolean | undefined {
 function parseGps(value: unknown): GpsPosition | undefined {
 	const record = asRecord(value);
 	if (record === undefined) return undefined;
-	const latitude = asNumber(record.latitude, record.lat, record.lng === undefined ? undefined : record.lng);
-	const longitude = asNumber(record.longitude, record.lng, record.lat === undefined ? undefined : record.lat);
+	// Latitude and longitude are independent fields; a missing one is NOT
+	// substituted with the other. Never fabricate coordinates.
+	const latitude = asNumber(record.latitude, record.lat);
+	const longitude = asNumber(record.longitude, record.lng);
 	if (latitude === undefined || longitude === undefined) return undefined;
+	if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) return undefined;
 	return { latitude, longitude, altitude: asNumber(record.altitude, record.alt, record.altitudeM) };
+}
+
+function isValidLatitude(value: number): boolean {
+	return value >= -90 && value <= 90;
+}
+
+function isValidLongitude(value: number): boolean {
+	return value >= -180 && value <= 180;
 }
 
 export function parseAirportStatus(raw: unknown, airportId: string): AirportStatus {
@@ -186,6 +197,14 @@ export function parseMissionStatus(raw: unknown, missionId: string): MissionStat
 	};
 }
 
+/**
+ * Parse a platform preflight payload.
+ *
+ * NOTE: the production preflight path is the client-side composed check
+ * (HttpPlatformClient.preflightCheck); this parser is exported for future
+ * platform-provided preflight endpoints. It fails closed: no explicit pass
+ * marker and no checks means NOT passed.
+ */
 export function parsePreflightResult(raw: unknown, airportId: string): PreflightResult {
 	const record = asRecord(raw) ?? {};
 	const checks = Array.isArray(record.checks) ? record.checks : [];
@@ -202,7 +221,9 @@ export function parsePreflightResult(raw: unknown, airportId: string): Preflight
 			};
 		})
 		.filter((check): check is PreflightResult["checks"][number] => check !== undefined);
-	const passed = asBoolean(record.passed, record.safe, record.ready) ?? parsedChecks.every((check) => check.passed);
+	const explicitPassed = asBoolean(record.passed, record.safe, record.ready);
+	// Fail closed: an empty check list without an explicit pass marker is NOT passed.
+	const passed = explicitPassed ?? (parsedChecks.length > 0 ? parsedChecks.every((check) => check.passed) : false);
 	return {
 		airportId,
 		passed,

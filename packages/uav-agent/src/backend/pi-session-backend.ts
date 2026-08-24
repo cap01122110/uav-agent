@@ -7,25 +7,32 @@
  */
 
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { mapPiEvent } from "../core/event-mapper.ts";
 import type { UavAgentEvent, UavAgentEventListener } from "../core/events.ts";
-import type { UavSessionBackend } from "../core/session-registry.ts";
+import type { SessionContext, UavSessionBackend } from "../core/session-registry.ts";
+import { PiEventAdapter } from "./pi-event-adapter.ts";
 
 export class PiSessionBackend implements UavSessionBackend {
 	readonly sessionId: string;
 	private readonly session: AgentSession;
+	private readonly context: SessionContext;
 	private readonly listeners = new Set<UavAgentEventListener>();
+	private readonly adapter = new PiEventAdapter();
 	private readonly unsubscribeSession: () => void;
 	private closed = false;
 
-	constructor(sessionId: string, session: AgentSession) {
+	constructor(sessionId: string, session: AgentSession, context: SessionContext) {
 		this.sessionId = sessionId;
 		this.session = session;
+		this.context = context;
 		this.unsubscribeSession = session.subscribe((event: AgentSessionEvent) => {
-			for (const uavEvent of mapPiEvent(event)) {
+			for (const uavEvent of this.adapter.map(event)) {
 				this.emit(uavEvent);
 			}
 		});
+	}
+
+	getContext(): SessionContext {
+		return this.context;
 	}
 
 	async sendMessage(message: string): Promise<void> {
@@ -43,8 +50,14 @@ export class PiSessionBackend implements UavSessionBackend {
 	}
 
 	emit(event: UavAgentEvent): void {
-		for (const listener of this.listeners) {
-			listener(event);
+		// Isolate subscriber failures: one broken listener (e.g. a UI component)
+		// must not block other listeners or pi session persistence.
+		for (const listener of [...this.listeners]) {
+			try {
+				listener(event);
+			} catch {
+				// A subscriber throwing must not break the event fan-out.
+			}
 		}
 	}
 
@@ -53,6 +66,7 @@ export class PiSessionBackend implements UavSessionBackend {
 			return;
 		}
 		this.closed = true;
+		this.listeners.clear();
 		this.unsubscribeSession();
 		await this.session.dispose();
 	}

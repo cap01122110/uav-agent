@@ -5,6 +5,10 @@
  * factory owns pi resource wiring: model runtime, settings, resource loader
  * (extensions/skills disabled, UAV system prompt injected), session
  * persistence, and tool configuration.
+ *
+ * Sessions are persisted as JSONL files. Creating a session with an id that
+ * already has persisted history restores that history instead of starting
+ * fresh (the TUI default "local-default" resumes across restarts).
  */
 
 import { randomUUID } from "node:crypto";
@@ -16,7 +20,13 @@ import {
 	getAgentDir,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import type { CreateSessionOptions, UavSessionBackend, UavSessionFactory } from "../core/session-registry.ts";
+import type { AgentContext } from "../core/context.ts";
+import type {
+	CreateSessionOptions,
+	SessionContext,
+	UavSessionBackend,
+	UavSessionFactory,
+} from "../core/session-registry.ts";
 import { UAV_SYSTEM_PROMPT } from "../prompt/system.ts";
 import { PiSessionBackend } from "./pi-session-backend.ts";
 
@@ -54,6 +64,12 @@ export class PiSessionFactory implements UavSessionFactory {
 
 	async create(options: CreateSessionOptions = {}): Promise<UavSessionBackend> {
 		const sessionId = options.sessionId ?? this.generateSessionId();
+		const context: AgentContext = {
+			sessionId,
+			userId: options.userId ?? "local-user",
+			tenantId: options.tenantId,
+			channel: options.channel ?? "tui",
+		};
 		const services = await createAgentSessionServices({
 			cwd: this.cwd,
 			agentDir: this.agentDir,
@@ -64,17 +80,38 @@ export class PiSessionFactory implements UavSessionFactory {
 				noThemes: true,
 				noContextFiles: true,
 				systemPrompt: this.systemPrompt,
+				// Block APPEND_SYSTEM.md files from <cwd>/.pi or the agent dir; the
+				// UAV prompt must not be polluted by coding-oriented appends.
+				appendSystemPromptOverride: () => [],
 			},
 		});
-		const sessionManager = SessionManager.create(this.cwd, this.sessionDir, { id: sessionId });
+		const sessionManager = await this.restoreOrCreateSessionManager(sessionId);
 		const { session } = await createAgentSessionFromServices({
 			services,
 			sessionManager,
 			noTools: this.noTools,
+			// Explicit allowlist: the model only sees the registered UAV tools.
+			tools: this.customTools.map((tool) => tool.name),
 			customTools: this.customTools,
-			sessionStartEvent: { type: "session_start", reason: "startup" },
+			sessionStartEvent: {
+				type: "session_start",
+				reason: sessionManager.isPersisted() && sessionManager.getEntries().length > 0 ? "resume" : "startup",
+			},
 		});
-		return new PiSessionBackend(sessionId, session);
+		return new PiSessionBackend(sessionId, session, context as SessionContext);
+	}
+
+	/**
+	 * Reuse persisted JSONL history for a session id when present, otherwise
+	 * create a fresh session file.
+	 */
+	private async restoreOrCreateSessionManager(sessionId: string): Promise<SessionManager> {
+		const sessions = await SessionManager.list(this.cwd, this.sessionDir);
+		const existing = sessions.find((info) => info.id === sessionId);
+		if (existing !== undefined) {
+			return SessionManager.open(existing.path, this.sessionDir, this.cwd);
+		}
+		return SessionManager.create(this.cwd, this.sessionDir, { id: sessionId });
 	}
 
 	private generateSessionId(): string {

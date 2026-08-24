@@ -11,12 +11,16 @@ import type { ActionStore } from "../actions/action-store.ts";
 import { InMemoryActionStore } from "../actions/action-store.ts";
 import type { ActionResult, UavAction } from "../actions/types.ts";
 import type { UavAgentEvent, UavAgentEventListener } from "./events.ts";
-import type { CreateSessionOptions, UavSessionBackend } from "./session-registry.ts";
+import type { CreateSessionOptions, UavSessionBackend, UavSessionFactory } from "./session-registry.ts";
 import { SessionRegistry } from "./session-registry.ts";
 
 export interface UavAgentRuntime {
-	/** Create a session and return its id. */
+	/** Create a session and return its id. Throws if the id already runs. */
 	createSession(options?: CreateSessionOptions): Promise<string>;
+	/** Resume a session: reuse the running backend or restore persisted history. */
+	resumeSession(options?: CreateSessionOptions): Promise<string>;
+	/** Create or resume a session id. Alias of resumeSession. */
+	createOrResumeSession(options?: CreateSessionOptions): Promise<string>;
 	/** Send a user message to a session; triggers an agent turn. */
 	sendMessage(sessionId: string, message: string): Promise<void>;
 	/** Subscribe to UAV events for one session. Returns an unsubscribe function. */
@@ -44,18 +48,26 @@ export interface UavAgentRuntimeOptions {
 
 export class UavAgentRuntimeImpl implements UavAgentRuntime {
 	private readonly registry: SessionRegistry;
-	private readonly actions: ActionStore;
+	private readonly actions: ActionService;
 
 	constructor(options: UavAgentRuntimeOptions) {
 		this.registry = new SessionRegistry(options.factory);
 		const store = options.actions ?? new InMemoryActionStore();
 		this.actions = new ActionService(store, {
-			onConfirmationRequired: (sessionId, event) => this.emitToSession(sessionId, event),
+			onActionEvent: (sessionId, event) => this.emitToSession(sessionId, event),
 		});
 	}
 
 	async createSession(options: CreateSessionOptions = {}): Promise<string> {
 		return this.registry.create(options);
+	}
+
+	async resumeSession(options: CreateSessionOptions = {}): Promise<string> {
+		return this.registry.resume(options);
+	}
+
+	async createOrResumeSession(options: CreateSessionOptions = {}): Promise<string> {
+		return this.registry.resume(options);
 	}
 
 	async sendMessage(sessionId: string, message: string): Promise<void> {
@@ -74,12 +86,14 @@ export class UavAgentRuntimeImpl implements UavAgentRuntime {
 
 	async confirmAction(sessionId: string, actionId: string): Promise<ActionResult> {
 		this.requireSession(sessionId);
-		return this.actions.confirm(sessionId, actionId);
+		const action = this.actions.resolve(sessionId, actionId);
+		return this.actions.confirm(sessionId, action.id);
 	}
 
 	async cancelAction(sessionId: string, actionId: string): Promise<void> {
 		this.requireSession(sessionId);
-		await this.actions.cancel(sessionId, actionId);
+		const action = this.actions.resolve(sessionId, actionId);
+		await this.actions.cancel(sessionId, action.id);
 	}
 
 	async prepareAction(sessionId: string, input: PrepareActionInput): Promise<UavAction> {

@@ -3,6 +3,10 @@
  *
  * Secrets (UAV_AGENT_CLIENT_SECRET) are read from the environment only. They
  * never enter the prompt, tool results, logs, or source.
+ *
+ * Auth contract: the real Java platform authenticates with a username/password
+ * login (agent service identity), so UAV_AGENT_CLIENT_ID/SECRET map to the
+ * login username/password. OAuth2 client_credentials is NOT used here.
  */
 
 import {
@@ -22,8 +26,6 @@ export interface UavPlatformConfig {
 	clientSecret?: string;
 	/** Pre-issued static token; takes precedence over other methods. */
 	token?: string;
-	/** OAuth2 token endpoint. Defaults to <baseUrl>/oauth/token. */
-	tokenUrl?: string;
 	/** Request timeout in milliseconds. */
 	timeoutMs?: number;
 	/** Workspace id required by the platform REST API. */
@@ -37,7 +39,6 @@ export function loadPlatformConfig(env: Record<string, string | undefined> = pro
 		clientId: env.UAV_AGENT_CLIENT_ID,
 		clientSecret: env.UAV_AGENT_CLIENT_SECRET,
 		token: env.UAV_PLATFORM_TOKEN,
-		tokenUrl: env.UAV_PLATFORM_TOKEN_URL,
 		timeoutMs: env.UAV_PLATFORM_TIMEOUT_MS ? Number(env.UAV_PLATFORM_TIMEOUT_MS) : undefined,
 		workspaceId: env.UAV_WORKSPACE_ID,
 	};

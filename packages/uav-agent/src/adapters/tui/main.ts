@@ -72,15 +72,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 	}
 
 	let runtime: UavAgentRuntimeImpl;
+	// Prepare/confirm actions are off by default: the model only sees read-only
+	// tools unless UAV_ENABLE_ACTIONS=1 explicitly opts in.
+	const enableActions = isTruthyEnv(process.env.UAV_ENABLE_ACTIONS);
 	const factory = new PiSessionFactory({
-		customTools: createUavTools(platform, {
-			prepareAction: (sessionId, input) => runtime.prepareAction(sessionId, input),
-		}),
+		customTools: createUavTools(
+			platform,
+			enableActions
+				? {
+						prepareAction: (sessionId, input) => runtime.prepareAction(sessionId, input),
+					}
+				: undefined,
+		),
 	});
 	runtime = new UavAgentRuntimeImpl({ factory });
 
 	try {
-		await runtime.createSession({ sessionId: options.sessionId, userId: "local-user", channel: "tui" });
+		// Resume so the default session (local-default) restores its history across restarts.
+		await runtime.resumeSession({ sessionId: options.sessionId, userId: "local-user", channel: "tui" });
 	} catch (error) {
 		console.error(
 			`Failed to start session: ${error instanceof Error ? error.message : String(error)}. ` +
@@ -100,4 +109,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 		console.error(error);
 		process.exit(1);
 	});
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+	return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
 }

@@ -41,11 +41,14 @@ export interface ActionResult {
 
 /** Error thrown for invalid action state transitions. */
 export class ActionError extends Error {
-	readonly code: "ACTION_NOT_FOUND" | "INVALID_TRANSITION";
+	readonly code: "ACTION_NOT_FOUND" | "INVALID_TRANSITION" | "AMBIGUOUS_ACTION_ID" | "EXECUTION_FAILED";
+	/** Related action id when available. */
+	readonly actionId?: string;
 
-	constructor(code: ActionError["code"], message: string) {
+	constructor(code: ActionError["code"], message: string, options: { actionId?: string } = {}) {
 		super(message);
 		this.name = "ActionError";
 		this.code = code;
+		this.actionId = options.actionId;
 	}
 }

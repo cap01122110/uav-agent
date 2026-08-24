@@ -117,3 +117,29 @@ describe("FetchHttpTransport", () => {
 		expect((error as DOMException).name).toBe("AbortError");
 	});
 });
+
+describe("FetchHttpTransport abort and timeout boundaries", () => {
+	it("never issues a request when the signal is already aborted", async () => {
+		let called = false;
+		stubFetch(async () => {
+			called = true;
+			return new Response("{}", { status: 200 });
+		});
+		const controller = new AbortController();
+		controller.abort();
+		const transport = new FetchHttpTransport();
+		try {
+			await transport.request({ method: "GET", url: "https://platform/x", signal: controller.signal });
+			expect.unreachable();
+		} catch (error) {
+			expect((error as DOMException).name).toBe("AbortError");
+		}
+		expect(called).toBe(false);
+	});
+
+	it("rejects non-finite timeout configuration", () => {
+		expect(() => new FetchHttpTransport({ timeoutMs: 0 })).toThrow(/positive/);
+		expect(() => new FetchHttpTransport({ timeoutMs: Number.NaN })).toThrow(/positive/);
+		expect(() => new FetchHttpTransport({ timeoutMs: -5 })).toThrow(/positive/);
+	});
+});

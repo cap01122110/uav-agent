@@ -26,6 +26,19 @@ export interface UavPlatformClient {
 export interface AirportApi {
 	/** Query one airport (dock) status by its SN. */
 	getStatus(airportId: string, signal?: AbortSignal): Promise<AirportStatus>;
+	/** Resolve an airport identifier (SN, nickname or device name) to its device SN. */
+	resolve(airportId: string, signal?: AbortSignal): Promise<ResolvedAirport>;
+}
+
+/** Result of resolving an airport identifier. */
+export interface ResolvedAirport {
+	/** The identifier the caller used. */
+	airportId: string;
+	/** Canonical device SN of the airport. */
+	deviceSn: string;
+	/** Display name (nickname or device name). */
+	name?: string;
+	online: boolean;
 }
 
 export interface DroneApi {
@@ -97,6 +110,7 @@ export class HttpPlatformClient implements UavPlatformClient {
 
 		this.airport = {
 			getStatus: (airportId, signal) => this.getAirportStatus(airportId, signal),
+			resolve: (airportId, signal) => this.resolveAirport(airportId, signal),
 		};
 		this.drone = {
 			getStatus: (droneSn, signal) => this.getDroneStatus(droneSn, signal),
@@ -114,6 +128,17 @@ export class HttpPlatformClient implements UavPlatformClient {
 		return parseAirportStatus(detail, airportId);
 	}
 
+	private async resolveAirport(airportId: string, signal?: AbortSignal): Promise<ResolvedAirport> {
+		const detail = await this.resolveAirportDetail(airportId, signal);
+		const record = detail as Record<string, unknown>;
+		return {
+			airportId,
+			deviceSn: asOptionalString(record.device_sn) ?? airportId,
+			name: asOptionalString(record.nickname) ?? asOptionalString(record.device_name),
+			online: asTruthy(record.status) || asTruthy(record.osd_online_status),
+		};
+	}
+
 	private async getDroneStatus(droneSn: string, signal?: AbortSignal): Promise<DroneStatus> {
 		const raw = await this.getDeviceDetail(droneSn, "DRONE_NOT_FOUND", signal);
 		return parseDroneStatus(raw, droneSn);
@@ -121,14 +146,14 @@ export class HttpPlatformClient implements UavPlatformClient {
 
 	private async getMissionStatus(missionId: string, signal?: AbortSignal): Promise<MissionStatus> {
 		const workspaceId = await this.resolveWorkspace(signal);
-		const envelope = await this.request<PlatformEnvelope<{ list?: unknown }>>({
+		const data = await this.request<{ list?: unknown }>({
 			method: "POST",
 			path: this.endpoints.jobList.replace("{workspace_id}", encodeURIComponent(workspaceId)),
 			notFoundCode: "MISSION_NOT_FOUND",
 			body: { page_num: 1, page_size: 100, workspace_id: workspaceId, job_id: missionId },
 			signal,
 		});
-		const items = Array.isArray(envelope?.list) ? envelope.list : [];
+		const items = Array.isArray(data?.list) ? data.list : [];
 		const normalized = missionId.toLowerCase();
 		const match = items.find((item) => {
 			if (typeof item !== "object" || item === null) return false;
@@ -150,10 +175,27 @@ export class HttpPlatformClient implements UavPlatformClient {
 	}
 
 	private async preflightCheck(airportId: string, signal?: AbortSignal): Promise<PreflightResult> {
+		// Resolving the airport also verifies it exists (else AIRPORT_NOT_FOUND).
 		const airport = await this.resolveAirportDetail(airportId, signal);
+		const deviceSn = asOptionalString(airport.device_sn) ?? airportId;
 		const childSn = asOptionalString(airport.child_device_sn);
+		// mode_code lives on the dock list endpoint, not the device detail.
+		const docks = await this.listAirportDocks(signal);
+		const dock = docks.find((entry) => entry.deviceSn === deviceSn);
+		const modeCode = dock?.modeCode;
+		const hasActiveJob = await this.airportHasActiveJob(deviceSn, signal);
+		const idleState = airportIdleState(modeCode, hasActiveJob);
+
 		const checks: PreflightResult["checks"] = [
-			{ name: "airport_online", passed: asTruthy(airport.status) || asTruthy(airport.osd_online_status) },
+			{
+				name: "airport_online",
+				passed: asTruthy(airport.status) || asTruthy(airport.osd_online_status),
+			},
+			{
+				name: "airport_idle",
+				passed: idleState === "idle",
+				detail: idleDetail(idleState),
+			},
 			{
 				name: "drone_bound",
 				passed: childSn !== undefined,
@@ -161,14 +203,19 @@ export class HttpPlatformClient implements UavPlatformClient {
 			},
 		];
 		if (childSn !== undefined) {
-			const drone = (await this.getDeviceDetail(childSn, signal)) as Record<string, unknown>;
+			const drone = (await this.getDeviceDetail(childSn, "DRONE_NOT_FOUND", signal)) as Record<string, unknown>;
+			// A docked drone being offline must not alone block the check; it is
+			// reported as informational only.
 			checks.push({
 				name: "drone_online",
 				passed: asTruthy(drone.status) || asTruthy(drone.osd_online_status),
-				detail: asOptionalString(drone.device_name),
+				detail: asOptionalString(drone.device_name) ?? childSn,
+				informational: true,
 			});
 		}
-		const passed = checks.every((check) => check.passed);
+		// Fail closed: every non-informational check must pass; missing/unknown
+		// state never defaults to flyable.
+		const passed = checks.filter((check) => check.informational !== true).every((check) => check.passed);
 		return {
 			airportId,
 			passed,
@@ -177,19 +224,42 @@ export class HttpPlatformClient implements UavPlatformClient {
 		};
 	}
 
+	/** Whether the airport has a running or paused mission (explicitly busy). */
+	private async airportHasActiveJob(dockSn: unknown, signal?: AbortSignal): Promise<boolean> {
+		const sn = asOptionalString(dockSn);
+		if (sn === undefined) return false;
+		const workspaceId = await this.resolveWorkspace(signal);
+		const data = await this.request<{ list?: unknown }>({
+			method: "POST",
+			path: this.endpoints.jobList.replace("{workspace_id}", encodeURIComponent(workspaceId)),
+			notFoundCode: "MISSION_NOT_FOUND",
+			body: { page_num: 1, page_size: 100, workspace_id: workspaceId, sn },
+			signal,
+		});
+		const items = Array.isArray(data?.list) ? data.list : [];
+		return items.some((item) => {
+			if (typeof item !== "object" || item === null) return false;
+			const record = item as Record<string, unknown>;
+			const status = typeof record.status === "number" ? record.status : Number(record.status);
+			// 1 = running, 6 = paused on the real platform.
+			return status === 1 || status === 6;
+		});
+	}
+
 	/** Resolve an airport by SN, nickname or device name and return its device detail. */
 	private async resolveAirportDetail(airportId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-		const docks = await this.listAirportDocks(signal);
-		if (docks.length === 0) {
-			throw new PlatformError({
-				code: "AIRPORT_NOT_FOUND",
-				message: `Airport not found: ${airportId}`,
-				retryable: false,
-			});
+		// Fast path: an SN directly addresses the device detail endpoint.
+		const direct = await this.tryDirectAirportDetail(airportId, signal);
+		if (direct !== undefined) {
+			return direct;
 		}
-		// Airport display names (nickname) only exist on the detail endpoint, so
-		// resolve every dock's detail and match by SN, nickname or device name.
-		const details = await Promise.all(docks.map((sn) => this.getDeviceDetail(sn, signal)));
+		// Slow path: resolve display names (nickname) which only exist on the
+		// detail endpoint. Unrelated dock failures must not fail the lookup.
+		const docks = await this.listAirportDocks(signal);
+		const settled = await Promise.allSettled(
+			docks.map((dock) => this.getDeviceDetail(dock.deviceSn, "AIRPORT_NOT_FOUND", signal)),
+		);
+		const details = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
 		const normalized = airportId.toLowerCase();
 		const match = details.find((detail) => {
 			const record = detail as Record<string, unknown>;
@@ -209,26 +279,44 @@ export class HttpPlatformClient implements UavPlatformClient {
 		return match as Record<string, unknown>;
 	}
 
+	/** Direct SN lookup that only succeeds when the device is a dock (airport). */
+	private async tryDirectAirportDetail(
+		airportId: string,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown> | undefined> {
+		try {
+			const raw = await this.getDeviceDetail(airportId, "AIRPORT_NOT_FOUND", signal);
+			const record = raw as Record<string, unknown>;
+			if (record.type === 3 || record.deviceType === 3) {
+				return record;
+			}
+			return undefined;
+		} catch {
+			// 404 or any other failure: fall back to name-based resolution.
+			return undefined;
+		}
+	}
+
 	/** List dock-type devices (airports) in the workspace. */
-	private async listAirportDocks(signal?: AbortSignal): Promise<string[]> {
+	private async listAirportDocks(signal?: AbortSignal): Promise<Array<{ deviceSn: string; modeCode?: number }>> {
 		const workspaceId = await this.resolveWorkspace(signal);
 		const body = { page_num: 1, page_size: 100, workspace_id: workspaceId };
-		const envelope = await this.request<PlatformEnvelope<{ list?: unknown }>>({
+		const data = await this.request<{ list?: unknown }>({
 			method: "POST",
 			path: this.endpoints.airportList.replace("{workspace_id}", encodeURIComponent(workspaceId)),
 			notFoundCode: "AIRPORT_NOT_FOUND",
 			body,
 			signal,
 		});
-		const items = Array.isArray(envelope?.list) ? envelope.list : [];
-		const result: string[] = [];
+		const items = Array.isArray(data?.list) ? data.list : [];
+		const result: Array<{ deviceSn: string; modeCode?: number }> = [];
 		for (const item of items) {
 			if (typeof item !== "object" || item === null) continue;
 			const record = item as Record<string, unknown>;
 			// deviceType 3 = dock/airport (the platform's DJI dock type).
 			if (record.deviceType !== 3) continue;
 			if (typeof record.deviceSn === "string" && record.deviceSn.length > 0) {
-				result.push(record.deviceSn);
+				result.push({ deviceSn: record.deviceSn, modeCode: asFiniteNumber(record.modeCode) });
 			}
 		}
 		return result;
@@ -278,14 +366,14 @@ export class HttpPlatformClient implements UavPlatformClient {
 
 	/** Return the first workspace this token can enter, preferring joined ones. */
 	private async resolveWorkspaceFromList(signal?: AbortSignal): Promise<string | undefined> {
-		const envelope = await this.request<PlatformEnvelope<{ list?: unknown }>>({
+		const data = await this.request<{ list?: unknown }>({
 			method: "POST",
 			path: this.endpoints.workspaceList,
 			notFoundCode: "AIRPORT_NOT_FOUND",
 			body: { page_num: 1, page_size: 100, region_code: "" },
 			signal,
 		});
-		const items = Array.isArray(envelope?.list) ? envelope.list : [];
+		const items = Array.isArray(data?.list) ? data.list : [];
 		let first: string | undefined;
 		for (const item of items) {
 			if (typeof item !== "object" || item === null) continue;
@@ -374,4 +462,36 @@ function asOptionalString(value: unknown): string | undefined {
 
 function asTruthy(value: unknown): boolean {
 	return value === true || value === 1 || value === "true" || value === "1";
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Airport idle semantics from the real platform: mode_code 0/1 are idle,
+ * explicit busy codes (taking off / landing / returning / operating) are
+ * busy, and anything unknown fails closed (not idle).
+ */
+type AirportIdleState = "idle" | "busy" | "unknown";
+
+function airportIdleState(modeCode: number | undefined, hasActiveJob: boolean): AirportIdleState {
+	if (hasActiveJob) return "busy";
+	if (modeCode === 0 || modeCode === 1) return "idle";
+	if (modeCode !== undefined && BUSY_MODE_CODES.has(modeCode)) return "busy";
+	return "unknown";
+}
+
+/** Platform codes that explicitly mean the airport is operating. */
+const BUSY_MODE_CODES = new Set([2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+function idleDetail(state: AirportIdleState): string | undefined {
+	switch (state) {
+		case "idle":
+			return "机场空闲";
+		case "busy":
+			return "机场忙碌(有执行中任务或正在作业)";
+		case "unknown":
+			return "机场空闲状态未知,按不可飞处理";
+	}
 }

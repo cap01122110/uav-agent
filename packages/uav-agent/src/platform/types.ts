@@ -56,6 +56,8 @@ export interface PreflightCheck {
 	name: string;
 	passed: boolean;
 	detail?: string;
+	/** Informational checks do not gate the result (e.g. drone offline while docked). */
+	informational?: boolean;
 }
 
 export interface PreflightResult {

@@ -7,13 +7,11 @@ describe("loadPlatformConfig", () => {
 			UAV_PLATFORM_URL: "https://platform.example.com",
 			UAV_AGENT_CLIENT_ID: "client-1",
 			UAV_AGENT_CLIENT_SECRET: "super-secret",
-			UAV_PLATFORM_TOKEN_URL: "https://platform.example.com/token",
 			UAV_PLATFORM_TIMEOUT_MS: "5000",
 		});
 		expect(config.baseUrl).toBe("https://platform.example.com");
 		expect(config.clientId).toBe("client-1");
 		expect(config.clientSecret).toBe("super-secret");
-		expect(config.tokenUrl).toBe("https://platform.example.com/token");
 		expect(config.timeoutMs).toBe(5000);
 	});
 
@@ -39,7 +37,7 @@ describe("createTokenProvider", () => {
 		expect(() => createTokenProvider({ baseUrl: "https://platform.example.com" })).toThrow(/credentials/);
 	});
 
-	it("defaults token url from the base url", () => {
+	it("uses username/password login for agent service identity", () => {
 		const provider = createTokenProvider({
 			baseUrl: "https://platform.example.com/",
 			clientId: "client-1",

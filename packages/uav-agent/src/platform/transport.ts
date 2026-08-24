@@ -3,6 +3,11 @@
  *
  * Owns raw fetch concerns: timeout, abort propagation, request ids, JSON
  * parsing, and stable error mapping. Never throws raw network errors.
+ *
+ * Invariants:
+ * - An already-aborted signal never issues a request.
+ * - The timeout covers the full request including response body reads.
+ * - Timeout values must be finite positive numbers.
  */
 
 import { randomUUID } from "node:crypto";
@@ -26,16 +31,28 @@ export interface HttpTransport {
 	request<T>(options: TransportRequestOptions): Promise<T>;
 }
 
+function assertFinitePositiveTimeout(timeoutMs: number, label: string): void {
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+		throw new Error(`${label} must be a finite positive number, got ${timeoutMs}`);
+	}
+}
+
 export class FetchHttpTransport implements HttpTransport {
 	private readonly timeoutMs: number;
 	private readonly onRequestId?: (requestId: string) => void;
 
 	constructor(options: { timeoutMs?: number; onRequestId?: (requestId: string) => void } = {}) {
-		this.timeoutMs = options.timeoutMs ?? 15_000;
+		const timeoutMs = options.timeoutMs ?? 15_000;
+		assertFinitePositiveTimeout(timeoutMs, "timeoutMs");
+		this.timeoutMs = timeoutMs;
 		this.onRequestId = options.onRequestId;
 	}
 
 	async request<T>(options: TransportRequestOptions): Promise<T> {
+		// Never issue a request after the caller already aborted.
+		if (options.signal?.aborted) {
+			throw new DOMException("The operation was aborted", "AbortError");
+		}
 		const requestId = randomUUID();
 		this.onRequestId?.(requestId);
 
@@ -52,8 +69,10 @@ export class FetchHttpTransport implements HttpTransport {
 			headers["content-type"] = "application/json";
 		}
 
-		const controller = new AbortController();
 		const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+		assertFinitePositiveTimeout(timeoutMs, "timeoutMs");
+
+		const controller = new AbortController();
 		let timedOut = false;
 		const timer = setTimeout(() => {
 			timedOut = true;
@@ -62,9 +81,13 @@ export class FetchHttpTransport implements HttpTransport {
 		const onAbort = () => controller.abort();
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 
-		let response: Response;
 		try {
-			response = await fetch(url, { method: options.method, headers, body, signal: controller.signal });
+			const response = await fetch(url, { method: options.method, headers, body, signal: controller.signal });
+			if (!response.ok) {
+				throw await createHttpError(response, requestId);
+			}
+			// Body read + JSON parsing stay inside the timeout window.
+			return await parseResponse<T>(response, requestId);
 		} catch (error) {
 			if (options.signal?.aborted) {
 				throw error;
@@ -75,6 +98,9 @@ export class FetchHttpTransport implements HttpTransport {
 					{ requestId, cause: error },
 				);
 			}
+			if (error instanceof PlatformError) {
+				throw error;
+			}
 			throw new PlatformError(
 				{ code: "PLATFORM_UNAVAILABLE", message: "Platform unreachable", retryable: true },
 				{ requestId, cause: error },
@@ -83,11 +109,6 @@ export class FetchHttpTransport implements HttpTransport {
 			clearTimeout(timer);
 			options.signal?.removeEventListener("abort", onAbort);
 		}
-
-		if (!response.ok) {
-			throw await createHttpError(response, requestId);
-		}
-		return parseResponse<T>(response, requestId);
 	}
 }
 

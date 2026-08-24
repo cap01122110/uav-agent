@@ -43,13 +43,16 @@ export class CachedTokenProvider implements TokenProvider {
 		this.clock = clock;
 	}
 
-	async getToken(signal?: AbortSignal): Promise<string> {
+	async getToken(_signal?: AbortSignal): Promise<string> {
 		const now = this.clock();
 		if (this.cached && this.cached.expiresAt > now + REFRESH_MARGIN_MS) {
 			return this.cached.value;
 		}
 		if (this.fetching === undefined) {
-			this.fetching = this.source.fetchToken(signal).then((token) => {
+			// Deliberately not bound to the caller's signal: one session aborting
+			// must not cancel the shared refresh for other sessions. The token
+			// source applies its own internal timeout.
+			this.fetching = this.source.fetchToken().then((token) => {
 				this.cached = token;
 				return token;
 			});
@@ -273,7 +276,15 @@ async function readBodyText(response: Response): Promise<string> {
 }
 
 /** Redact any credential material from a server-supplied detail string. */
+/**
+ * Redact credential material from a server-supplied detail string.
+ * Values of known sensitive keys are replaced; never echo secrets back.
+ */
 function safeDetail(detail: string): string {
-	if (detail.length > 200) return detail.slice(0, 200);
-	return detail;
+	const truncated = detail.length > 200 ? detail.slice(0, 200) : detail;
+	// Match JSON key:value pairs for known sensitive keys and redact values.
+	return truncated.replace(
+		/"(token|access_token|accessToken|x-auth-token|secret|client_secret|password|authorization|cookie)"\s*:\s*"[^"]*"/gi,
+		'"$1":"[REDACTED]"',
+	);
 }
