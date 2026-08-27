@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { UavAgentEvent, UavAgentEventListener } from "../../src/core/events.ts";
-import {
-	SessionRegistry,
-	type UavSessionBackend,
-	type UavSessionFactory,
-	UnknownSessionError,
-} from "../../src/core/session-registry.ts";
+import type { SessionContext, UavSessionBackend, UavSessionFactory } from "../../src/core/session-registry.ts";
+import { SessionRegistry, UnknownSessionError } from "../../src/core/session-registry.ts";
 
 class FakeBackend implements UavSessionBackend {
 	readonly sessionId: string;
@@ -15,6 +11,10 @@ class FakeBackend implements UavSessionBackend {
 
 	constructor(sessionId: string) {
 		this.sessionId = sessionId;
+	}
+
+	getContext(): SessionContext {
+		return { sessionId: this.sessionId, userId: "local-user", channel: "tui" };
 	}
 
 	async sendMessage(message: string): Promise<void> {

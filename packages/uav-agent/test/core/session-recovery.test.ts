@@ -5,12 +5,12 @@ import { SessionExistsError, SessionRegistry, UnknownSessionError } from "../../
 
 class FakeBackend implements UavSessionBackend {
 	readonly sessionId: string;
+	readonly context: SessionContext;
 	closed = false;
-	constructor(
-		sessionId: string,
-		private readonly context: SessionContext,
-	) {
+
+	constructor(sessionId: string, context: SessionContext) {
 		this.sessionId = sessionId;
+		this.context = context;
 	}
 	getContext(): SessionContext {
 		return this.context;

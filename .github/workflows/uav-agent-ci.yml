@@ -1,0 +1,44 @@
+name: UAV Agent CI
+
+on:
+  push:
+    branches: [feature/flight-pi]
+  pull_request:
+    branches: [feature/flight-pi]
+
+concurrency:
+  group: uav-agent-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uav-agent-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # uav-agent compiles against the built .d.ts of its workspace
+      # dependencies, so build all packages in dependency order first.
+      - name: Build workspace
+        run: npm run build
+
+      - name: Build uav-agent
+        run: npm run build --workspace=@earendil-works/pi-uav-agent
+
+      - name: Test uav-agent
+        run: npm test --workspace=@earendil-works/pi-uav-agent
+
+      - name: Typecheck uav-agent (incl. tests)
+        run: npx tsgo -p packages/uav-agent/tsconfig.json --noEmit
+
+      - name: Lint uav-agent
+        run: npx biome check packages/uav-agent

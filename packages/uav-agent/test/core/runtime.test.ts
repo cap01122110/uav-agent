@@ -3,7 +3,7 @@ import { type ActionStore, InMemoryActionStore } from "../../src/actions/action-
 import { ActionError } from "../../src/actions/types.ts";
 import type { UavAgentEvent, UavAgentEventListener } from "../../src/core/events.ts";
 import { UavAgentRuntimeImpl } from "../../src/core/runtime.ts";
-import type { CreateSessionOptions, UavSessionBackend } from "../../src/core/session-registry.ts";
+import type { CreateSessionOptions, SessionContext, UavSessionBackend } from "../../src/core/session-registry.ts";
 import { UnknownSessionError } from "../../src/core/session-registry.ts";
 
 class FakeBackend implements UavSessionBackend {
@@ -15,6 +15,10 @@ class FakeBackend implements UavSessionBackend {
 
 	constructor(sessionId: string) {
 		this.sessionId = sessionId;
+	}
+
+	getContext(): SessionContext {
+		return { sessionId: this.sessionId, userId: "local-user", channel: "tui" };
 	}
 
 	async sendMessage(message: string): Promise<void> {

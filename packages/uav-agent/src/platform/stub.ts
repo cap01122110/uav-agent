@@ -10,7 +10,7 @@
  * downstream code and tests can never mistake them for real platform state.
  */
 
-import type { AirportApi, DroneApi, MissionApi, SafetyApi, UavPlatformClient } from "./client.ts";
+import type { AirportApi, DroneApi, MissionApi, ResolvedAirport, SafetyApi, UavPlatformClient } from "./client.ts";
 import { PlatformError } from "./errors.ts";
 import type { AirportStatus, DroneStatus, MissionStatus, PreflightResult } from "./types.ts";
 
@@ -46,6 +46,21 @@ export class DevStubPlatformClient implements UavPlatformClient {
 					});
 				}
 				return Promise.resolve(devStubAirportStatus(airportId));
+			},
+			resolve: (airportId) => {
+				if (!this.airports.has(airportId)) {
+					throw new PlatformError({
+						code: "AIRPORT_NOT_FOUND",
+						message: `Airport not found: ${airportId}`,
+						retryable: false,
+					});
+				}
+				return Promise.resolve({
+					airportId,
+					deviceSn: airportId,
+					name: airportId,
+					online: true,
+				} satisfies ResolvedAirport);
 			},
 		};
 		this.drone = {

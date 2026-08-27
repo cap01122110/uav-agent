@@ -3,6 +3,7 @@ import type { UavAction } from "../../src/actions/types.ts";
 import type { UavPlatformClient } from "../../src/platform/client.ts";
 import type { PrepareActionContext } from "../../src/tools/actions/prepare-actions.ts";
 import { createUavTools } from "../../src/tools/index.ts";
+import { fakeExtensionContext, firstText } from "../helpers/tools.ts";
 
 function createPlatform(): UavPlatformClient {
 	return {
@@ -70,13 +71,13 @@ describe("prepare action tools", () => {
 		expect(tool).toBeDefined();
 		expect(tool?.executionMode).toBe("sequential");
 
-		const extensionCtx = { sessionManager: { getSessionId: () => "s1" } };
-		const result = await tool?.execute("c1", { dockSn: "DOCK1" }, undefined, undefined, extensionCtx as never);
+		const result = await tool?.execute("c1", { dockSn: "DOCK1" }, undefined, undefined, fakeExtensionContext());
+		expect(result).toBeDefined();
 		expect(context.actions).toHaveLength(1);
 		const action = context.actions[0]!;
 		expect(action.status).toBe("WAITING_CONFIRMATION");
 		expect(action.type).toBe("return_home");
-		expect(result?.content[0]?.text).toContain(action.id);
+		expect(firstText(result!)).toContain(action.id);
 	});
 
 	it("prepare_point_flight carries the target coordinates in the payload", async () => {
@@ -84,13 +85,12 @@ describe("prepare action tools", () => {
 		const context = createContext();
 		const tools = createUavTools(platform, context);
 		const tool = tools.find((t) => t.name === "prepare_point_flight");
-		const extensionCtx = { sessionManager: { getSessionId: () => "s1" } };
 		await tool?.execute(
 			"c1",
 			{ dockSn: "DOCK1", latitude: 22.5, longitude: 114.1 },
 			undefined,
 			undefined,
-			extensionCtx as never,
+			fakeExtensionContext(),
 		);
 		const action = context.actions[0]!;
 		expect(action.payload).toEqual({ dockSn: "DOCK1", latitude: 22.5, longitude: 114.1, altitude: undefined });
@@ -101,8 +101,7 @@ describe("prepare action tools", () => {
 		const context = createContext();
 		const tools = createUavTools(platform, context);
 		const tool = tools.find((t) => t.name === "prepare_start_live");
-		const extensionCtx = { sessionManager: { getSessionId: () => "s1" } };
-		await tool?.execute("c1", { dockSn: "DOCK1" }, undefined, undefined, extensionCtx as never);
+		await tool?.execute("c1", { dockSn: "DOCK1" }, undefined, undefined, fakeExtensionContext());
 		// The platform client was never touched.
 		expect(platform.airport.getStatus).not.toHaveBeenCalled();
 		expect(platform.drone.getStatus).not.toHaveBeenCalled();

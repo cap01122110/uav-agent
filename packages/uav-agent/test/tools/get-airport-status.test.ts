@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { UavPlatformClient } from "../../src/platform/client.ts";
 import { PlatformError } from "../../src/platform/errors.ts";
 import { getAirportStatusTool } from "../../src/tools/airport/get-airport-status.ts";
+import { fakeExtensionContext, firstText } from "../helpers/tools.ts";
 
 function createPlatform(airportStatus: unknown): UavPlatformClient {
 	return {
@@ -35,9 +36,15 @@ describe("get_airport_status tool", () => {
 		const status = { airportId: "Test-01", online: true, battery: 90 };
 		const platform = createPlatform(status);
 		const tool = getAirportStatusTool(platform);
-		const result = await tool.execute("call-1", { airportId: "Test-01" }, undefined, undefined, undefined);
+		const result = await tool.execute(
+			"call-1",
+			{ airportId: "Test-01" },
+			undefined,
+			undefined,
+			fakeExtensionContext(),
+		);
 		expect(platform.airport.getStatus).toHaveBeenCalledWith("Test-01", undefined);
-		expect(JSON.parse(result.content[0]!.text)).toEqual(status);
+		expect(JSON.parse(firstText(result))).toEqual(status);
 		expect(result.details).toEqual(status);
 	});
 
@@ -46,8 +53,8 @@ describe("get_airport_status tool", () => {
 			new PlatformError({ code: "AIRPORT_NOT_FOUND", message: "Airport not found: X", retryable: false }),
 		);
 		const tool = getAirportStatusTool(platform);
-		await expect(tool.execute("call-1", { airportId: "X" }, undefined, undefined, undefined)).rejects.toThrow(
-			/Airport not found/,
-		);
+		await expect(
+			tool.execute("call-1", { airportId: "X" }, undefined, undefined, fakeExtensionContext()),
+		).rejects.toThrow(/Airport not found/);
 	});
 });
