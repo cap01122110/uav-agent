@@ -13,7 +13,12 @@
 import { Input, ProcessTerminal, Text, TuiMainScreen } from "@earendil-works/pi-tui";
 import type { UavAgentEvent } from "../../core/events.ts";
 import type { UavAgentRuntime } from "../../core/runtime.ts";
-import { ChatView, STYLES } from "./chat-view.ts";
+import { ChatView } from "./chat-view.ts";
+import { separatorLine } from "./components/notices.ts";
+import { STYLES } from "./components/styles.ts";
+
+/** Width of the static chrome separators (title rule and footer rule). */
+const CHROME_WIDTH = 56;
 
 export interface TuiAdapterOptions {
 	runtime: UavAgentRuntime;
@@ -59,7 +64,9 @@ export class TuiAdapter {
 		};
 
 		tui.addChild(new Text(STYLES.title(this.title), 1, 0));
+		tui.addChild(separatorLine(CHROME_WIDTH));
 		tui.addChild(chat.container);
+		tui.addChild(separatorLine(CHROME_WIDTH));
 		tui.addChild(status);
 		tui.addChild(input);
 		tui.setFocus(input);

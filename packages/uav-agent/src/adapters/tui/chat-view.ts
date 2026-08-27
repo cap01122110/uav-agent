@@ -3,47 +3,49 @@
  *
  * Pure rendering: no business logic, no platform knowledge. It only consumes
  * UavAgentEvent values and produces TUI components.
+ *
+ * State kept here is presentation-only:
+ * - one AssistantMessageComponent per assistant message (streaming updates it
+ *   in place, so the identity header never repeats per delta)
+ * - one ToolActivityComponent per toolCallId (start/completed share one line)
  */
-
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { UavAgentEvent } from "../../core/events.ts";
+import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { ConfirmationComponent, ErrorComponent, separatorLine } from "./components/notices.ts";
+import { STYLES } from "./components/styles.ts";
+import { ToolActivityComponent } from "./components/tool-activity.ts";
+import { UserMessageComponent } from "./components/user-message.ts";
 
-export const STYLES = {
-	user: (text: string) => `\x1b[36m${text}\x1b[0m`,
-	assistant: (text: string) => text,
-	tool: (text: string) => `\x1b[90m${text}\x1b[0m`,
-	error: (text: string) => `\x1b[31m${text}\x1b[0m`,
-	status: (text: string) => `\x1b[90m${text}\x1b[0m`,
-	confirmation: (text: string) => `\x1b[33m${text}\x1b[0m`,
-	title: (text: string) => `\x1b[1m\x1b[33m${text}\x1b[0m`,
-} as const;
+export { STYLES };
 
-/** Assistant message that can be updated in place as deltas arrive. */
-class AssistantMessageComponent {
-	private readonly text: Text;
-	private readonly container: Container;
-
-	constructor(container: Container, content: string) {
-		this.container = container;
-		this.text = new Text(content, 1, 0);
-		this.container.addChild(this.text);
-	}
-
-	setContent(content: string): void {
-		this.text.setText(content);
-	}
-}
+/** Approximate terminal width used to wrap user input before the first render. */
+const DEFAULT_WIDTH = 80;
+/** Blank lines inserted between conversation blocks. */
+const BLOCK_GAP = 1;
 
 export class ChatView {
 	/** Container added to the TUI; messages are appended to it. */
 	readonly container = new Container();
 	private assistant: AssistantMessageComponent | undefined;
 	private assistantBuffer = "";
+	/** Tool lines keyed by toolCallId so start/completed share one row. */
+	private readonly tools = new Map<string, ToolActivityComponent>();
+	private readonly width: number;
+
+	constructor(width: number = DEFAULT_WIDTH) {
+		this.width = width;
+	}
 
 	addUserMessage(content: string): void {
-		this.assistant = undefined;
-		this.assistantBuffer = "";
-		this.container.addChild(new Text(STYLES.user(`You: ${content}`), 1, 0));
+		this.finishAssistant();
+		// Turn boundary: dim rule before each new user message once there is
+		// prior content. Intentionally not tied to message.completed — the run
+		// lifecycle may span several messages.
+		if (this.container.children.length > 0) {
+			this.container.addChild(separatorLine(this.width));
+		}
+		this.container.addChild(new UserMessageComponent(content, this.width));
 	}
 
 	/** Append a streaming delta to the current assistant message. */
@@ -61,7 +63,8 @@ export class ChatView {
 
 	private updateAssistant(content: string): void {
 		if (this.assistant === undefined) {
-			this.assistant = new AssistantMessageComponent(this.container, content);
+			this.assistant = new AssistantMessageComponent(content);
+			this.container.addChild(this.assistant);
 			return;
 		}
 		this.assistant.setContent(content);
@@ -73,21 +76,32 @@ export class ChatView {
 	}
 
 	startTool(toolCallId: string, toolName: string): void {
-		this.container.addChild(new Text(STYLES.tool(`[tool] ${toolName}`), 1, 0));
-		void toolCallId;
+		// A restarted id replaces its line rather than stacking a duplicate.
+		const existing = this.tools.get(toolCallId);
+		if (existing !== undefined) {
+			this.container.removeChild(existing);
+		}
+		const component = new ToolActivityComponent(toolCallId, toolName);
+		this.tools.set(toolCallId, component);
+		this.container.addChild(component);
 	}
 
-	completeTool(toolName: string, isError?: boolean): void {
-		const mark = isError ? "failed" : "ok";
-		this.container.addChild(new Text(STYLES.tool(`[tool] ${toolName} ${mark}`), 1, 0));
+	completeTool(toolCallId: string, _toolName: string, isError?: boolean): void {
+		this.tools.get(toolCallId)?.complete(isError === true);
 	}
 
 	addError(code: string, message: string): void {
-		this.container.addChild(new Text(STYLES.error(`Error [${code}]: ${message}`), 1, 0));
+		this.gap();
+		this.container.addChild(new ErrorComponent(code, message));
 	}
 
 	addInfo(text: string): void {
 		this.container.addChild(new Text(text, 1, 0));
+	}
+
+	private gap(): void {
+		if (this.container.children.length === 0) return;
+		this.container.addChild(new Spacer(BLOCK_GAP));
 	}
 
 	renderEvent(event: UavAgentEvent): void {
@@ -102,7 +116,7 @@ export class ChatView {
 				this.startTool(event.toolCallId, event.toolName);
 				break;
 			case "tool.completed":
-				this.completeTool(event.toolName, event.isError);
+				this.completeTool(event.toolCallId, event.toolName, event.isError);
 				break;
 			case "error":
 				this.addError(event.code, event.message);
@@ -111,15 +125,8 @@ export class ChatView {
 			case "turn.completed":
 				break;
 			case "action.confirmation_required":
-				this.container.addChild(
-					new Text(
-						STYLES.confirmation(
-							`[确认] ${event.actionType}: ${event.summary} — /confirm ${event.actionId.slice(0, 8)} 或 /cancel ${event.actionId.slice(0, 8)}`,
-						),
-						1,
-						0,
-					),
-				);
+				this.gap();
+				this.container.addChild(new ConfirmationComponent(event.actionType, event.summary, event.actionId));
 				break;
 			case "action.started":
 			case "action.completed":
