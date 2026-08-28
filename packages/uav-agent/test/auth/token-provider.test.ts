@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { CachedTokenProvider, ClientCredentialsTokenSource, StaticTokenSource } from "../../src/auth/token-provider.ts";
+import {
+	CachedTokenProvider,
+	ClientCredentialsTokenSource,
+	PasswordTokenSource,
+	StaticTokenSource,
+} from "../../src/auth/token-provider.ts";
 import { PlatformError } from "../../src/platform/errors.ts";
 
 describe("CachedTokenProvider", () => {
@@ -112,6 +117,285 @@ describe("ClientCredentialsTokenSource", () => {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				expect(message).not.toContain("super-secret");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("covers a stalled body read with UPSTREAM_TIMEOUT", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+					const stream = new ReadableStream<Uint8Array>({
+						start(controller) {
+							init?.signal?.addEventListener("abort", () =>
+								controller.error(new DOMException("aborted", "AbortError")),
+							);
+						},
+					});
+					return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+				}),
+			);
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+				timeoutMs: 100,
+			});
+			const promise = source.fetchToken();
+			const errorPromise = promise.catch((error: unknown) => error);
+			await vi.advanceTimersByTimeAsync(200);
+			const error = await errorPromise;
+			expect(error).toBeInstanceOf(PlatformError);
+			expect((error as PlatformError).code).toBe("UPSTREAM_TIMEOUT");
+			expect((error as PlatformError).message).toBe("Token request timed out.");
+		} finally {
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("never issues a request when the signal is already aborted", async () => {
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+			});
+			try {
+				await source.fetchToken(controller.signal);
+				expect.unreachable();
+			} catch (error) {
+				expect((error as DOMException).name).toBe("AbortError");
+			}
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("propagates a mid-flight caller abort as AbortError", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				(_url: string | URL | Request, init?: RequestInit) =>
+					new Promise((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+					}),
+			),
+		);
+		try {
+			const controller = new AbortController();
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+				timeoutMs: 10_000,
+			});
+			const promise = source.fetchToken(controller.signal);
+			const errorPromise = promise.catch((error: unknown) => error);
+			controller.abort();
+			const error = await errorPromise;
+			expect((error as DOMException).name).toBe("AbortError");
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("maps a missing access_token to INVALID_RESPONSE", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(JSON.stringify({ expires_in: 3600 }), { status: 200 })),
+		);
+		try {
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				expect((error as PlatformError).code).toBe("INVALID_RESPONSE");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+});
+
+describe("PasswordTokenSource", () => {
+	it("never leaks the upstream login message or credentials", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						JSON.stringify({ code: 40001, message: "Login denied password=hunter2 token=secret", data: null }),
+						{ status: 200 },
+					),
+			),
+		);
+		try {
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				expect((error as PlatformError).code).toBe("PERMISSION_DENIED");
+				expect((error as PlatformError).message).toBe("Login failed");
+				expect((error as PlatformError).message).not.toContain("hunter2");
+				expect((error as PlatformError).message).not.toContain("secret");
+				expect((error as PlatformError).message).not.toContain("40001");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("redacts an HTTP login failure body on the cause without leaking to the message", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response('{"error":"bad credentials token=abc"}', { status: 401 })),
+		);
+		try {
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				const err = error as PlatformError;
+				expect(err.code).toBe("PERMISSION_DENIED");
+				expect(err.message).toBe("Login failed (401)");
+				expect(err.message).not.toContain("abc");
+				// The cause carries only redacted detail.
+				const cause = (err as Error).cause;
+				const causeText = cause instanceof Error ? cause.message : "";
+				expect(causeText).not.toContain("abc");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("covers a stalled body read with UPSTREAM_TIMEOUT", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+					const stream = new ReadableStream<Uint8Array>({
+						start(controller) {
+							init?.signal?.addEventListener("abort", () =>
+								controller.error(new DOMException("aborted", "AbortError")),
+							);
+						},
+					});
+					return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+				}),
+			);
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+				timeoutMs: 100,
+			});
+			const promise = source.fetchToken();
+			const errorPromise = promise.catch((error: unknown) => error);
+			await vi.advanceTimersByTimeAsync(200);
+			const error = await errorPromise;
+			expect(error).toBeInstanceOf(PlatformError);
+			expect((error as PlatformError).code).toBe("UPSTREAM_TIMEOUT");
+			expect((error as PlatformError).message).toBe("Login request timed out.");
+		} finally {
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("never issues a login request when the signal is already aborted", async () => {
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+			});
+			try {
+				await source.fetchToken(controller.signal);
+				expect.unreachable();
+			} catch (error) {
+				expect((error as DOMException).name).toBe("AbortError");
+			}
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("propagates a mid-flight caller abort as AbortError", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				(_url: string | URL | Request, init?: RequestInit) =>
+					new Promise((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+					}),
+			),
+		);
+		try {
+			const controller = new AbortController();
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+				timeoutMs: 10_000,
+			});
+			const promise = source.fetchToken(controller.signal);
+			const errorPromise = promise.catch((error: unknown) => error);
+			controller.abort();
+			const error = await errorPromise;
+			expect((error as DOMException).name).toBe("AbortError");
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("maps a login response without a token to INVALID_RESPONSE", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(JSON.stringify({ code: 0, message: "ok", data: null }), { status: 200 })),
+		);
+		try {
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				expect((error as PlatformError).code).toBe("INVALID_RESPONSE");
 			}
 		} finally {
 			vi.unstubAllGlobals();

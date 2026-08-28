@@ -13,6 +13,7 @@
  */
 
 import { PlatformError } from "../platform/errors.ts";
+import { redactThenTruncate } from "./redaction.ts";
 
 /** Supplies a bearer token for platform requests. */
 export interface TokenProvider {
@@ -83,6 +84,9 @@ export class ClientCredentialsTokenSource implements TokenSource {
 	}
 
 	async fetchToken(signal?: AbortSignal): Promise<Token> {
+		if (signal?.aborted) {
+			throw new DOMException("The operation was aborted", "AbortError");
+		}
 		const body = new URLSearchParams({
 			grant_type: "client_credentials",
 			client_id: this.options.clientId,
@@ -93,13 +97,16 @@ export class ClientCredentialsTokenSource implements TokenSource {
 		}
 
 		const controller = new AbortController();
+		let timedOut = false;
 		const timeoutMs = this.options.timeoutMs ?? 10_000;
-		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		const timer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, timeoutMs);
 		const onAbort = () => controller.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
-		let response: Response;
 		try {
-			response = await fetch(this.options.tokenUrl, {
+			const response = await fetch(this.options.tokenUrl, {
 				method: "POST",
 				headers: {
 					"content-type": "application/x-www-form-urlencoded",
@@ -108,8 +115,36 @@ export class ClientCredentialsTokenSource implements TokenSource {
 				body,
 				signal: controller.signal,
 			});
+			if (!response.ok) {
+				// Raw body is discarded from the public message; only a redacted
+				// fragment may survive on the cause for diagnostics.
+				const detail = await readBodyText(response);
+				throw new PlatformError(
+					{ code: "PERMISSION_DENIED", message: `Token request failed (${response.status})`, retryable: false },
+					{ status: response.status, cause: new Error(redactThenTruncate(detail)) },
+				);
+			}
+
+			const payload = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
+			if (typeof payload.access_token !== "string" || payload.access_token.length === 0) {
+				throw new PlatformError({
+					code: "INVALID_RESPONSE",
+					message: "Token endpoint returned no access_token",
+					retryable: false,
+				});
+			}
+			const expiresIn =
+				typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in) ? payload.expires_in : 3600;
+			return { value: payload.access_token, expiresAt: Date.now() + expiresIn * 1000 };
 		} catch (error) {
 			if (signal?.aborted) throw error;
+			if (timedOut) {
+				throw new PlatformError(
+					{ code: "UPSTREAM_TIMEOUT", message: "Token request timed out.", retryable: true },
+					{ cause: error },
+				);
+			}
+			if (error instanceof PlatformError) throw error;
 			throw new PlatformError(
 				{ code: "PLATFORM_UNAVAILABLE", message: "Token endpoint unreachable", retryable: true },
 				{ cause: error },
@@ -118,26 +153,6 @@ export class ClientCredentialsTokenSource implements TokenSource {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 		}
-
-		if (!response.ok) {
-			const detail = await readBodyText(response);
-			throw new PlatformError(
-				{ code: "PERMISSION_DENIED", message: `Token request failed (${response.status})`, retryable: false },
-				{ status: response.status, cause: new Error(safeDetail(detail)) },
-			);
-		}
-
-		const payload = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
-		if (typeof payload.access_token !== "string" || payload.access_token.length === 0) {
-			throw new PlatformError({
-				code: "UNKNOWN_ERROR",
-				message: "Token endpoint returned no access_token",
-				retryable: false,
-			});
-		}
-		const expiresIn =
-			typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in) ? payload.expires_in : 3600;
-		return { value: payload.access_token, expiresAt: Date.now() + expiresIn * 1000 };
 	}
 }
 
@@ -211,25 +226,67 @@ export class PasswordTokenSource implements TokenSource {
 	}
 
 	async fetchToken(signal?: AbortSignal): Promise<Token> {
+		if (signal?.aborted) {
+			throw new DOMException("The operation was aborted", "AbortError");
+		}
 		const controller = new AbortController();
+		let timedOut = false;
 		const timeoutMs = this.options.timeoutMs ?? 10_000;
-		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		const timer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, timeoutMs);
 		const onAbort = () => controller.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
 
 		const url = `${this.options.baseUrl.replace(/\/+$/, "")}${this.options.loginPath ?? DEFAULT_LOGIN_PATH}`;
 		const body = JSON.stringify({ username: this.options.username, password: this.options.password });
 
-		let response: Response;
 		try {
-			response = await fetch(url, {
+			const response = await fetch(url, {
 				method: "POST",
 				headers: { "content-type": "application/json", accept: "application/json" },
 				body,
 				signal: controller.signal,
 			});
+			if (!response.ok) {
+				const detail = await readBodyText(response);
+				throw new PlatformError(
+					{ code: "PERMISSION_DENIED", message: `Login failed (${response.status})`, retryable: false },
+					{ status: response.status, cause: new Error(redactThenTruncate(detail)) },
+				);
+			}
+
+			const payload = (await response.json()) as { code?: unknown; message?: unknown; data?: unknown };
+			if (payload.code !== 0) {
+				// The upstream login message is untrusted text; never expose it.
+				throw new PlatformError({
+					code: "PERMISSION_DENIED",
+					message: "Login failed",
+					retryable: false,
+				});
+			}
+			const token = extractJwt(payload.data);
+			if (token === undefined) {
+				throw new PlatformError({
+					code: "INVALID_RESPONSE",
+					message: "Login response contained no token",
+					retryable: false,
+				});
+			}
+			return {
+				value: token,
+				expiresAt: jwtExpiryMs(token) ?? Date.now() + DEFAULT_TOKEN_TTL_MS,
+			};
 		} catch (error) {
 			if (signal?.aborted) throw error;
+			if (timedOut) {
+				throw new PlatformError(
+					{ code: "UPSTREAM_TIMEOUT", message: "Login request timed out.", retryable: true },
+					{ cause: error },
+				);
+			}
+			if (error instanceof PlatformError) throw error;
 			throw new PlatformError(
 				{ code: "PLATFORM_UNAVAILABLE", message: "Login endpoint unreachable", retryable: true },
 				{ cause: error },
@@ -238,32 +295,6 @@ export class PasswordTokenSource implements TokenSource {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 		}
-
-		if (!response.ok) {
-			const detail = await readBodyText(response);
-			throw new PlatformError(
-				{ code: "PERMISSION_DENIED", message: `Login failed (${response.status})`, retryable: false },
-				{ status: response.status, cause: new Error(safeDetail(detail)) },
-			);
-		}
-
-		const payload = (await response.json()) as { code?: unknown; message?: unknown; data?: unknown };
-		if (payload.code !== 0) {
-			const message = typeof payload.message === "string" ? payload.message : "Login failed";
-			throw new PlatformError({ code: "PERMISSION_DENIED", message, retryable: false });
-		}
-		const token = extractJwt(payload.data);
-		if (token === undefined) {
-			throw new PlatformError({
-				code: "UNKNOWN_ERROR",
-				message: "Login response contained no token",
-				retryable: false,
-			});
-		}
-		return {
-			value: token,
-			expiresAt: jwtExpiryMs(token) ?? Date.now() + DEFAULT_TOKEN_TTL_MS,
-		};
 	}
 }
 
@@ -273,18 +304,4 @@ async function readBodyText(response: Response): Promise<string> {
 	} catch {
 		return "";
 	}
-}
-
-/** Redact any credential material from a server-supplied detail string. */
-/**
- * Redact credential material from a server-supplied detail string.
- * Values of known sensitive keys are replaced; never echo secrets back.
- */
-function safeDetail(detail: string): string {
-	const truncated = detail.length > 200 ? detail.slice(0, 200) : detail;
-	// Match JSON key:value pairs for known sensitive keys and redact values.
-	return truncated.replace(
-		/"(token|access_token|accessToken|x-auth-token|secret|client_secret|password|authorization|cookie)"\s*:\s*"[^"]*"/gi,
-		'"$1":"[REDACTED]"',
-	);
 }

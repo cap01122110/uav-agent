@@ -1,4 +1,4 @@
-import { mapHttpStatus, PlatformError } from "../../src/platform/errors.ts";
+import { isRetryableStatus, mapHttpStatus, PlatformError } from "../../src/platform/errors.ts";
 import type { HttpTransport, TransportRequestOptions } from "../../src/platform/transport.ts";
 
 /** Scripted transport: queues responses in order; >=400 becomes a PlatformError. */
@@ -17,7 +17,7 @@ export class MockTransport implements HttpTransport {
 			// exact error category (403 -> PERMISSION_DENIED, 504 -> timeout...).
 			const code = mapHttpStatus(response.status) ?? "UNKNOWN_ERROR";
 			throw new PlatformError(
-				{ code, message: `HTTP ${response.status}`, retryable: false },
+				{ code, message: `HTTP ${response.status}`, retryable: isRetryableStatus(response.status) },
 				{ status: response.status },
 			);
 		}

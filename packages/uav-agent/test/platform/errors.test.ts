@@ -37,4 +37,23 @@ describe("PlatformError", () => {
 		expect(error.retryable).toBe(false);
 		expect(error.toInfo()).toEqual({ code: "AIRPORT_NOT_FOUND", message: "no such airport", retryable: false });
 	});
+
+	it("toInfo never exposes cause, stack or credential material", () => {
+		const error = new PlatformError(
+			{ code: "PLATFORM_UNAVAILABLE", message: "UAV platform is unavailable.", retryable: true },
+			{
+				status: 503,
+				cause: new Error("HTTP 503 body=password=secret token=abc stackTrace=org.springframework"),
+			},
+		);
+		const serialized = JSON.stringify(error.toInfo());
+		expect(serialized).toContain("PLATFORM_UNAVAILABLE");
+		expect(serialized).not.toContain("secret");
+		expect(serialized).not.toContain("password");
+		expect(serialized).not.toContain("token");
+		expect(serialized).not.toContain("abc");
+		expect(serialized).not.toContain("spring");
+		expect(serialized).not.toContain("cause");
+		expect(serialized).not.toContain("stack");
+	});
 });
