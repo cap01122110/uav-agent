@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
+import type { PlatformError } from "../../src/platform/errors.ts";
 import {
 	parseAirportStatus,
 	parseDroneStatus,
 	parseMissionStatus,
 	parsePreflightResult,
 } from "../../src/platform/parsers.ts";
+
+function expectInvalidResponse(run: () => unknown): void {
+	try {
+		run();
+		expect.unreachable();
+	} catch (error) {
+		expect((error as PlatformError).code).toBe("INVALID_RESPONSE");
+	}
+}
 
 describe("parseAirportStatus", () => {
 	it("parses a getDevice detail payload", () => {
@@ -25,7 +35,7 @@ describe("parseAirportStatus", () => {
 	});
 
 	it("parses login_time into epoch ms", () => {
-		const status = parseAirportStatus({ login_time: "2026-08-21 09:48:54" }, "A");
+		const status = parseAirportStatus({ status: true, login_time: "2026-08-21 09:48:54" }, "A");
 		expect(status.lastSeenAt).toBe(Date.parse("2026-08-21T09:48:54"));
 	});
 
@@ -34,8 +44,14 @@ describe("parseAirportStatus", () => {
 		expect(parseAirportStatus({ online_status: "offline" }, "A").online).toBe(false);
 	});
 
-	it("defaults missing state to offline", () => {
-		expect(parseAirportStatus({}, "A").online).toBe(false);
+	it("parses an explicit false as offline", () => {
+		expect(parseAirportStatus({ status: false }, "A").online).toBe(false);
+	});
+
+	it("throws INVALID_RESPONSE when online state is missing", () => {
+		expectInvalidResponse(() => parseAirportStatus({}, "A"));
+		expectInvalidResponse(() => parseAirportStatus({ nickname: "A" }, "A"));
+		expectInvalidResponse(() => parseAirportStatus({ status: "unrecognizable" }, "A"));
 	});
 });
 
@@ -52,19 +68,35 @@ describe("parseDroneStatus", () => {
 	});
 
 	it("does not fabricate coordinates when one axis is missing", () => {
-		expect(parseDroneStatus({ gps: { latitude: 22.82 } }, "SN").gps).toBeUndefined();
-		expect(parseDroneStatus({ gps: { longitude: 108.32 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ online: true, gps: { latitude: 22.82 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ online: true, gps: { longitude: 108.32 } }, "SN").gps).toBeUndefined();
 	});
 
 	it("rejects out-of-range coordinates", () => {
-		expect(parseDroneStatus({ gps: { latitude: 120, longitude: 108.32 } }, "SN").gps).toBeUndefined();
-		expect(parseDroneStatus({ gps: { latitude: 22.82, longitude: 190 } }, "SN").gps).toBeUndefined();
-		expect(parseDroneStatus({ gps: { latitude: -95, longitude: 0 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ online: true, gps: { latitude: 120, longitude: 108.32 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ online: true, gps: { latitude: 22.82, longitude: 190 } }, "SN").gps).toBeUndefined();
+		expect(parseDroneStatus({ online: true, gps: { latitude: -95, longitude: 0 } }, "SN").gps).toBeUndefined();
 	});
 
 	it("maps flightStatus alias", () => {
-		expect(parseDroneStatus({ flightStatus: "flying" }, "SN").flying).toBe(true);
-		expect(parseDroneStatus({ flightStatus: "landed" }, "SN").flying).toBe(false);
+		expect(parseDroneStatus({ online: true, flightStatus: "flying" }, "SN").flying).toBe(true);
+		expect(parseDroneStatus({ online: true, flightStatus: "landed" }, "SN").flying).toBe(false);
+	});
+
+	it("leaves flying unknown when the platform does not report it", () => {
+		const status = parseDroneStatus({ online: true }, "SN");
+		expect(status.flying).toBeUndefined();
+	});
+
+	it("throws INVALID_RESPONSE when online state is missing or illegible", () => {
+		expectInvalidResponse(() => parseDroneStatus({}, "SN"));
+		expectInvalidResponse(() => parseDroneStatus({ flying: true }, "SN"));
+		expectInvalidResponse(() => parseDroneStatus({ status: "weird" }, "SN"));
+	});
+
+	it("throws INVALID_RESPONSE for a non-record payload", () => {
+		expectInvalidResponse(() => parseDroneStatus(null, "SN"));
+		expectInvalidResponse(() => parseMissionStatus("garbage", "M1"));
 	});
 });
 

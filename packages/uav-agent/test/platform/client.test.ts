@@ -1,31 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { HttpPlatformClient } from "../../src/platform/client.ts";
-import { PlatformError } from "../../src/platform/errors.ts";
-import type { HttpTransport, TransportRequestOptions } from "../../src/platform/transport.ts";
-
-class MockTransport implements HttpTransport {
-	calls: TransportRequestOptions[] = [];
-	responses: Array<{ status: number; body: unknown }> = [];
-
-	async request<T>(options: TransportRequestOptions): Promise<T> {
-		this.calls.push(options);
-		const response = this.responses.shift();
-		if (response === undefined) {
-			throw new Error("No mock response queued");
-		}
-		if (response.status >= 400) {
-			throw new PlatformError(
-				{ code: "PLATFORM_UNAVAILABLE", message: `HTTP ${response.status}`, retryable: false },
-				{ status: response.status },
-			);
-		}
-		return response.body as T;
-	}
-}
-
-function envelope(data: unknown): unknown {
-	return { code: 0, message: "success", data };
-}
+import type { PlatformError } from "../../src/platform/errors.ts";
+import { envelope, listPage, MockTransport } from "../helpers/mock-transport.ts";
 
 function createClient(transport: MockTransport, token = "tok-1"): HttpPlatformClient {
 	return new HttpPlatformClient({
@@ -42,13 +18,15 @@ describe("HttpPlatformClient", () => {
 		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({
 			status: 200,
-			body: envelope({
-				list: [
+			body: listPage(
+				[
 					{ deviceSn: "8UUXN7N00A0G5T", deviceType: 3, deviceName: "DJI DOCK 3" },
 					{ deviceSn: "7CACN870010SVT", deviceType: 174, deviceName: "DJI RC PLUS 2" },
 				],
-				pagination: { page: 1, page_size: 2, total: 2 },
-			}),
+				1,
+				2,
+				2,
+			),
 		});
 		transport.responses.push({
 			status: 200,
@@ -86,7 +64,7 @@ describe("HttpPlatformClient", () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ device_sn: "8UUXN7N00A0G5T", type: 3, nickname: "Test-01" }),
+			body: envelope({ device_sn: "8UUXN7N00A0G5T", type: 3, nickname: "Test-01", status: true }),
 		});
 		const client = createClient(transport);
 		const status = await client.airport.getStatus("8UUXN7N00A0G5T");
@@ -98,7 +76,7 @@ describe("HttpPlatformClient", () => {
 	it("resolve returns the canonical device SN", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true }),
@@ -115,7 +93,7 @@ describe("HttpPlatformClient", () => {
 		transport.responses.push({ status: 404, body: undefined });
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "8UUXN7N00A0G5T", deviceType: 3 }] }),
+			body: listPage([{ deviceSn: "8UUXN7N00A0G5T", deviceType: 3 }], 1, 1, 1),
 		});
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "8UUXN7N00A0G5T", nickname: "Other" }) });
 		const client = createClient(transport);
@@ -130,7 +108,7 @@ describe("HttpPlatformClient", () => {
 	it("returns AIRPORT_NOT_FOUND when the workspace has no docks", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
 		const client = createClient(transport);
 		try {
 			await client.airport.getStatus("Test-01");
@@ -193,7 +171,7 @@ describe("HttpPlatformClient", () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ job_id: "J1", status: 3, begin_time: 1_700_000_000 }] }),
+			body: listPage([{ job_id: "J1", status: 3, begin_time: 1_700_000_000 }], 1, 1, 1),
 		});
 		const client = createClient(transport);
 		const status = await client.mission.getStatus("J1");
@@ -204,7 +182,7 @@ describe("HttpPlatformClient", () => {
 	it("preflightCheck passes when airport is online, idle and drone is bound", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({
@@ -217,9 +195,9 @@ describe("HttpPlatformClient", () => {
 		});
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
+			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({ device_sn: "DRONE1", status: true, device_name: "Matrice 4TD" }),
@@ -233,7 +211,7 @@ describe("HttpPlatformClient", () => {
 	it("docked drone offline does not alone fail the preflight check", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({
@@ -246,9 +224,9 @@ describe("HttpPlatformClient", () => {
 		});
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
+			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: false }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
@@ -261,7 +239,7 @@ describe("HttpPlatformClient", () => {
 	it("preflightCheck rejects an airport with an active (running) job", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({
@@ -274,9 +252,9 @@ describe("HttpPlatformClient", () => {
 		});
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }] }),
+			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: envelope({ list: [{ job_id: "J1", status: 1 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ job_id: "J1", status: 1 }], 1, 1, 1) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: true }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
@@ -288,7 +266,7 @@ describe("HttpPlatformClient", () => {
 	it("preflightCheck fails closed when the airport idle state is unknown", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3 }] }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({
@@ -301,9 +279,9 @@ describe("HttpPlatformClient", () => {
 		});
 		transport.responses.push({
 			status: 200,
-			body: envelope({ list: [{ deviceSn: "DOCK1", deviceType: 3, modeCode: -1 }] }),
+			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: -1 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: true }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
@@ -316,7 +294,7 @@ describe("HttpPlatformClient", () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({ device_sn: "A", type: 3 }),
+			body: envelope({ device_sn: "A", type: 3, status: true }),
 		});
 		const client = createClient(transport);
 		const controller = new AbortController();
@@ -326,7 +304,7 @@ describe("HttpPlatformClient", () => {
 
 	it("passes an abort signal to the token provider", async () => {
 		const transport = new MockTransport();
-		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", type: 3 }) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", type: 3, status: true }) });
 		const getToken = vi.fn(async () => "tok");
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
@@ -341,8 +319,8 @@ describe("HttpPlatformClient", () => {
 
 	it("throws INVALID_REQUEST when no workspace can be resolved", async () => {
 		const transport = new MockTransport();
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
-		transport.responses.push({ status: 200, body: envelope({ list: [], pagination: null }) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
 			tokenProvider: { getToken: async () => "tok" },
@@ -360,16 +338,19 @@ describe("HttpPlatformClient", () => {
 		const transport = new MockTransport();
 		transport.responses.push({
 			status: 200,
-			body: envelope({
-				list: [
+			body: listPage(
+				[
 					{ workspace_id: "ws-2", workspace_name: "B", joined: false, capabilities: { can_enter: false } },
 					{ workspace_id: "ws-1", workspace_name: "A", joined: true, capabilities: { can_enter: true } },
 				],
-			}),
+				1,
+				2,
+				2,
+			),
 		});
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: envelope({ list: [{ deviceSn: "A", deviceType: 3 }] }) });
-		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", nickname: "A" }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "A", deviceType: 3 }], 1, 1, 1) });
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", nickname: "A", status: true }) });
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
 			tokenProvider: { getToken: async () => "tok" },

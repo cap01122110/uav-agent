@@ -2,17 +2,34 @@
  * Platform response adapters.
  *
  * These parse the Java platform's wire responses into stable UAV domain types.
- * The exact wire shapes differ per deployment; parsers are tolerant and only
- * read known fields. Tightening these adapters is part of the Phase 8
- * integration pass against the real platform.
+ * Real-time state fields (online, flying) are never defaulted: a missing or
+ * unrecognizable value throws INVALID_RESPONSE instead of fabricating
+ * "offline" / "not flying". Truly optional descriptive fields stay optional.
  */
 
 import type { AirportStatus, DroneStatus, GpsPosition, MissionStatus, PreflightResult } from "./types.ts";
+import { asWireBoolean, invalidResponse, requireRecord } from "./validation.ts";
 
 type JsonRecord = Record<string, unknown>;
 
+/** Record view of an optional nested value; undefined when absent or not an object. */
 function asRecord(value: unknown): JsonRecord | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonRecord) : undefined;
+}
+
+/**
+ * Online flag from the platform's device-status aliases. undefined means the
+ * platform did not report a legible online state - callers must treat that as
+ * unknown, never as offline.
+ */
+export function deviceOnlineStatus(record: JsonRecord): boolean | undefined {
+	return (
+		asWireBoolean(record.status) ??
+		asWireBoolean(record.online_status) ??
+		asWireBoolean(record.osd_online_status) ??
+		asWireBoolean(record.online) ??
+		asWireBoolean(record.onlineStatus)
+	);
 }
 
 function asNumber(...values: unknown[]): number | undefined {
@@ -25,17 +42,8 @@ function asNumber(...values: unknown[]): number | undefined {
 
 function asBoolean(...values: unknown[]): boolean | undefined {
 	for (const value of values) {
-		if (typeof value === "boolean") return value;
-		if (typeof value === "number") return value !== 0;
-		if (typeof value === "string") {
-			const normalized = value.toLowerCase();
-			if (normalized === "true" || normalized === "1" || normalized === "online" || normalized === "running") {
-				return true;
-			}
-			if (normalized === "false" || normalized === "0" || normalized === "offline" || normalized === "stopped") {
-				return false;
-			}
-		}
+		const parsed = asWireBoolean(value);
+		if (parsed !== undefined) return parsed;
 	}
 	return undefined;
 }
@@ -82,10 +90,10 @@ function isValidLongitude(value: number): boolean {
 }
 
 export function parseAirportStatus(raw: unknown, airportId: string): AirportStatus {
-	const record = asRecord(raw) ?? {};
-	const online =
-		asBoolean(record.status, record.online_status, record.osd_online_status, record.online, record.onlineStatus) ??
-		false;
+	const record = requireRecord(raw, "airportStatus");
+	// Missing or unrecognizable online state is invalid, not offline.
+	const online = deviceOnlineStatus(record);
+	if (online === undefined) throw invalidResponse("airportStatus.online");
 	const name =
 		typeof record.nickname === "string"
 			? record.nickname
@@ -124,14 +132,15 @@ function parseDateTimeMs(value: unknown): number | undefined {
 }
 
 export function parseDroneStatus(raw: unknown, droneSn: string): DroneStatus {
-	const record = asRecord(raw) ?? {};
-	const online =
-		asBoolean(record.status, record.online_status, record.osd_online_status, record.online, record.onlineStatus) ??
-		false;
+	const record = requireRecord(raw, "droneStatus");
+	// Missing or unrecognizable online state is invalid, not offline.
+	const online = deviceOnlineStatus(record);
+	if (online === undefined) throw invalidResponse("droneStatus.online");
 	return {
 		droneSn,
 		online,
-		flying: asFlightStatus(record.flying, record.flight_status, record.flightStatus) ?? false,
+		// Not reported by every device-detail payload; undefined = unknown.
+		flying: asFlightStatus(record.flying, record.flight_status, record.flightStatus),
 		mode: typeof record.mode === "string" ? record.mode : undefined,
 		battery: asNumber(
 			record.battery,
@@ -173,7 +182,7 @@ const JOB_STATUS_MAP: Record<number, MissionStatus["status"]> = {
 };
 
 export function parseMissionStatus(raw: unknown, missionId: string): MissionStatus {
-	const record = asRecord(raw) ?? {};
+	const record = requireRecord(raw, "missionStatus");
 	const rawStatus = typeof record.status === "string" ? record.status.toLowerCase() : "";
 	const numericStatus = typeof record.status === "number" ? record.status : asNumber(record.status);
 	const status =

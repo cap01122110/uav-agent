@@ -32,7 +32,8 @@ export interface AirportStatus {
 export interface DroneStatus {
 	droneSn: string;
 	online: boolean;
-	flying: boolean;
+	/** In flight, when the platform reports it; undefined = unknown, never fabricated. */
+	flying?: boolean;
 	mode?: string;
 	battery?: number;
 	speed?: number;
