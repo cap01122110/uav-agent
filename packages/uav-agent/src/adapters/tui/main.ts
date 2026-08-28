@@ -12,6 +12,7 @@
  */
 
 import { PiSessionFactory } from "../../backend/pi-session-factory.ts";
+import { HttpUavCapabilityClient } from "../../capability/http-client.ts";
 import { UavAgentRuntimeImpl } from "../../core/runtime.ts";
 import type { UavPlatformClient } from "../../platform/client.ts";
 import { createPlatformClientFromEnv } from "../../platform/config.ts";
@@ -70,6 +71,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 		);
 		process.exit(1);
 	}
+	const capabilities = new HttpUavCapabilityClient(platform);
 
 	let runtime: UavAgentRuntimeImpl;
 	// Prepare/confirm actions are off by default: the model only sees read-only
@@ -77,7 +79,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 	const enableActions = isTruthyEnv(process.env.UAV_ENABLE_ACTIONS);
 	const factory = new PiSessionFactory({
 		customTools: createUavTools(
-			platform,
+			capabilities,
 			enableActions
 				? {
 						prepareAction: (sessionId, input) => runtime.prepareAction(sessionId, input),

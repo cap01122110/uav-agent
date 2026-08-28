@@ -7,7 +7,7 @@
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { UavPlatformClient } from "../platform/client.ts";
+import type { UavCapabilityClient } from "../capability/client.ts";
 import { createPrepareActionTools, type PrepareActionContext } from "./actions/prepare-actions.ts";
 import { getAirportStatusTool } from "./airport/get-airport-status.ts";
 import { resolveAirportTool } from "./airport/resolve-airport.ts";
@@ -21,14 +21,14 @@ export type { DroneStatusToolInput } from "./drone/get-drone-status.ts";
 export type { MissionStatusToolInput } from "./mission/get-mission-status.ts";
 export type { PreflightCheckToolInput } from "./safety/preflight-check.ts";
 
-/** Register all UAV tools against one platform client and confirmation context. */
-export function createUavTools(platform: UavPlatformClient, actions?: PrepareActionContext): ToolDefinition[] {
+/** Register all UAV tools against one capability client and confirmation context. */
+export function createUavTools(capabilities: UavCapabilityClient, actions?: PrepareActionContext): ToolDefinition[] {
 	return [
-		getAirportStatusTool(platform),
-		resolveAirportTool(platform),
-		getDroneStatusTool(platform),
-		getMissionStatusTool(platform),
-		preflightCheckTool(platform),
+		getAirportStatusTool(capabilities),
+		resolveAirportTool(capabilities),
+		getDroneStatusTool(capabilities),
+		getMissionStatusTool(capabilities),
+		preflightCheckTool(capabilities),
 		...(actions !== undefined ? createPrepareActionTools(actions) : []),
 	];
 }

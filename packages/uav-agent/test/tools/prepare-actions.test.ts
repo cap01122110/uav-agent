@@ -1,18 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { UavAction } from "../../src/actions/types.ts";
-import type { UavPlatformClient } from "../../src/platform/client.ts";
 import type { PrepareActionContext } from "../../src/tools/actions/prepare-actions.ts";
 import { createUavTools } from "../../src/tools/index.ts";
+import { createFakeCapability } from "../helpers/fake-capability.ts";
 import { fakeExtensionContext, firstText } from "../helpers/tools.ts";
-
-function createPlatform(): UavPlatformClient {
-	return {
-		airport: { getStatus: vi.fn(), resolve: vi.fn() },
-		drone: { getStatus: vi.fn() },
-		mission: { getStatus: vi.fn() },
-		safety: { preflightCheck: vi.fn() },
-	} as unknown as UavPlatformClient;
-}
 
 function createContext(): PrepareActionContext & { actions: UavAction[] } {
 	const actions: UavAction[] = [];
@@ -37,7 +28,7 @@ function createContext(): PrepareActionContext & { actions: UavAction[] } {
 
 describe("tool registration defaults", () => {
 	it("defaults to read-only tools without prepare actions", () => {
-		const tools = createUavTools(createPlatform());
+		const tools = createUavTools(createFakeCapability());
 		const names = tools.map((tool) => tool.name);
 		expect(names).toEqual(
 			expect.arrayContaining([
@@ -54,7 +45,7 @@ describe("tool registration defaults", () => {
 	});
 
 	it("adds prepare tools only when an action context is provided", () => {
-		const tools = createUavTools(createPlatform(), createContext());
+		const tools = createUavTools(createFakeCapability(), createContext());
 		const names = tools.map((tool) => tool.name);
 		expect(names).toContain("prepare_return_home");
 		expect(names).toContain("prepare_point_flight");
@@ -64,9 +55,8 @@ describe("tool registration defaults", () => {
 
 describe("prepare action tools", () => {
 	it("prepare_return_home creates a WAITING_CONFIRMATION action with the full id", async () => {
-		const platform = createPlatform();
 		const context = createContext();
-		const tools = createUavTools(platform, context);
+		const tools = createUavTools(createFakeCapability(), context);
 		const tool = tools.find((t) => t.name === "prepare_return_home");
 		expect(tool).toBeDefined();
 		expect(tool?.executionMode).toBe("sequential");
@@ -81,9 +71,8 @@ describe("prepare action tools", () => {
 	});
 
 	it("prepare_point_flight carries the target coordinates in the payload", async () => {
-		const platform = createPlatform();
 		const context = createContext();
-		const tools = createUavTools(platform, context);
+		const tools = createUavTools(createFakeCapability(), context);
 		const tool = tools.find((t) => t.name === "prepare_point_flight");
 		await tool?.execute(
 			"c1",
@@ -97,13 +86,13 @@ describe("prepare action tools", () => {
 	});
 
 	it("prepare tools never execute flight control (only create actions)", async () => {
-		const platform = createPlatform();
+		const capabilities = createFakeCapability();
 		const context = createContext();
-		const tools = createUavTools(platform, context);
+		const tools = createUavTools(capabilities, context);
 		const tool = tools.find((t) => t.name === "prepare_start_live");
 		await tool?.execute("c1", { dockSn: "DOCK1" }, undefined, undefined, fakeExtensionContext());
-		// The platform client was never touched.
-		expect(platform.airport.getStatus).not.toHaveBeenCalled();
-		expect(platform.drone.getStatus).not.toHaveBeenCalled();
+		// The capability client was never touched.
+		expect(capabilities.getAirportStatus).not.toHaveBeenCalled();
+		expect(capabilities.getDroneStatus).not.toHaveBeenCalled();
 	});
 });

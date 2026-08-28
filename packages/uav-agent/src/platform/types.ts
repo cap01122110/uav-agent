@@ -12,6 +12,17 @@ export interface GpsPosition {
 	altitude?: number;
 }
 
+/** Result of resolving an airport identifier to its canonical device SN. */
+export interface ResolvedAirport {
+	/** The identifier the caller used. */
+	airportId: string;
+	/** Canonical device SN of the airport. */
+	deviceSn: string;
+	/** Display name (nickname or device name). */
+	name?: string;
+	online: boolean;
+}
+
 export interface AirportStatus {
 	/** Airport id used to address the airport (SN or name). */
 	airportId: string;

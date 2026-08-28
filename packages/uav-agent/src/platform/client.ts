@@ -15,13 +15,17 @@
  */
 
 import type { TokenProvider } from "../auth/token-provider.ts";
+import { platformErrorMessage } from "./error-message.ts";
 import { PlatformError, type PlatformErrorCode } from "./errors.ts";
 import { ACTIVE_JOB_STATUSES, isKnownJobStatus } from "./job-status.ts";
 import { collectPagedList, iteratePagedList, type PagedListPayload, validatePagedList } from "./pagination.ts";
 import { deviceOnlineStatus, parseAirportStatus, parseDroneStatus, parseMissionStatus } from "./parsers.ts";
 import type { HttpTransport } from "./transport.ts";
 import { FetchHttpTransport } from "./transport.ts";
-import type { AirportStatus, DroneStatus, MissionStatus, PreflightResult } from "./types.ts";
+import type { AirportStatus, DroneStatus, MissionStatus, PreflightResult, ResolvedAirport } from "./types.ts";
+
+export type { ResolvedAirport } from "./types.ts";
+
 import { invalidResponse, requireEnvelopeCode, requireRecord } from "./validation.ts";
 
 export interface UavPlatformClient {
@@ -36,17 +40,6 @@ export interface AirportApi {
 	getStatus(airportId: string, signal?: AbortSignal): Promise<AirportStatus>;
 	/** Resolve an airport identifier (SN, nickname or device name) to its device SN. */
 	resolve(airportId: string, signal?: AbortSignal): Promise<ResolvedAirport>;
-}
-
-/** Result of resolving an airport identifier. */
-export interface ResolvedAirport {
-	/** The identifier the caller used. */
-	airportId: string;
-	/** Canonical device SN of the airport. */
-	deviceSn: string;
-	/** Display name (nickname or device name). */
-	name?: string;
-	online: boolean;
 }
 
 export interface DroneApi {
@@ -346,11 +339,15 @@ export class HttpPlatformClient implements UavPlatformClient {
 				return record;
 			}
 			return undefined;
-		} catch {
-			// Not an SN hit (404/business not-found) or a transient direct
-			// failure: fall through to the name-based scan below, which
-			// re-queries authoritatively and fails closed on its own errors.
-			return undefined;
+		} catch (error) {
+			// Only a genuine "this id is not a directly-addressable airport SN"
+			// miss falls back to the name scan. Permission, timeout,
+			// unavailability, invalid responses and caller aborts propagate
+			// instead of being masked as AIRPORT_NOT_FOUND.
+			if (isNotFound(error)) {
+				return undefined;
+			}
+			throw error;
 		}
 	}
 
@@ -511,14 +508,13 @@ export class HttpPlatformClient implements UavPlatformClient {
 			});
 			const record = requireRecord(envelope, `${options.context}.envelope`);
 			const code = requireEnvelopeCode(record, options.context);
-			// The platform signals business failures with a non-zero code.
+			// The platform signals business failures with a non-zero code. The
+			// upstream `message` is untrusted text and never becomes the public
+			// error message; the stable per-code wording is used instead.
 			if (code !== 0) {
-				const message =
-					typeof record.message === "string" && record.message.length > 0
-						? record.message
-						: "Platform request failed";
+				const mapped = mapBusinessCode(code);
 				throw new PlatformError(
-					{ code: mapBusinessCode(code), message, retryable: false },
+					{ code: mapped, message: platformErrorMessage(mapped), retryable: false },
 					{ requestId: undefined },
 				);
 			}

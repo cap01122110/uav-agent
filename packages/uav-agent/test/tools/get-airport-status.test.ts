@@ -1,30 +1,25 @@
-import { describe, expect, it, vi } from "vitest";
-import type { UavPlatformClient } from "../../src/platform/client.ts";
+import { describe, expect, it, type vi } from "vitest";
+import type { UavCapabilityClient } from "../../src/capability/client.ts";
 import { PlatformError } from "../../src/platform/errors.ts";
 import { getAirportStatusTool } from "../../src/tools/airport/get-airport-status.ts";
+import { createFakeCapability } from "../helpers/fake-capability.ts";
 import { fakeExtensionContext, firstText } from "../helpers/tools.ts";
 
-function createPlatform(airportStatus: unknown): UavPlatformClient {
-	return {
-		airport: { getStatus: vi.fn(async () => airportStatus) },
-		drone: { getStatus: vi.fn() },
-		mission: { getStatus: vi.fn() },
-		safety: { preflightCheck: vi.fn() },
-	} as unknown as UavPlatformClient;
+function createCapabilityWithStatus(airportStatus: unknown): UavCapabilityClient {
+	const capabilities = createFakeCapability();
+	(capabilities.getAirportStatus as ReturnType<typeof vi.fn>).mockResolvedValue(airportStatus);
+	return capabilities;
 }
 
-function createFailingPlatform(error: Error): UavPlatformClient {
-	return {
-		airport: { getStatus: vi.fn(async () => Promise.reject(error)) },
-		drone: { getStatus: vi.fn() },
-		mission: { getStatus: vi.fn() },
-		safety: { preflightCheck: vi.fn() },
-	} as unknown as UavPlatformClient;
+function createFailingCapability(error: Error): UavCapabilityClient {
+	const capabilities = createFakeCapability();
+	(capabilities.getAirportStatus as ReturnType<typeof vi.fn>).mockRejectedValue(error);
+	return capabilities;
 }
 
 describe("get_airport_status tool", () => {
 	it("has a valid TypeBox schema requiring airportId", () => {
-		const tool = getAirportStatusTool(createPlatform({}));
+		const tool = getAirportStatusTool(createFakeCapability());
 		expect(tool.name).toBe("get_airport_status");
 		const schema = tool.parameters;
 		const properties = (schema as { properties?: Record<string, unknown> }).properties;
@@ -32,10 +27,10 @@ describe("get_airport_status tool", () => {
 		expect((schema as { required?: string[] }).required).toContain("airportId");
 	});
 
-	it("calls the platform client and returns the status as JSON", async () => {
+	it("calls the capability client and returns the status as JSON", async () => {
 		const status = { airportId: "Test-01", online: true, battery: 90 };
-		const platform = createPlatform(status);
-		const tool = getAirportStatusTool(platform);
+		const capabilities = createCapabilityWithStatus(status);
+		const tool = getAirportStatusTool(capabilities);
 		const result = await tool.execute(
 			"call-1",
 			{ airportId: "Test-01" },
@@ -43,16 +38,16 @@ describe("get_airport_status tool", () => {
 			undefined,
 			fakeExtensionContext(),
 		);
-		expect(platform.airport.getStatus).toHaveBeenCalledWith("Test-01", undefined);
+		expect(capabilities.getAirportStatus).toHaveBeenCalledWith({ airportId: "Test-01" }, undefined);
 		expect(JSON.parse(firstText(result))).toEqual(status);
 		expect(result.details).toEqual(status);
 	});
 
 	it("propagates platform errors to the model accurately", async () => {
-		const platform = createFailingPlatform(
+		const capabilities = createFailingCapability(
 			new PlatformError({ code: "AIRPORT_NOT_FOUND", message: "Airport not found: X", retryable: false }),
 		);
-		const tool = getAirportStatusTool(platform);
+		const tool = getAirportStatusTool(capabilities);
 		await expect(
 			tool.execute("call-1", { airportId: "X" }, undefined, undefined, fakeExtensionContext()),
 		).rejects.toThrow(/Airport not found/);

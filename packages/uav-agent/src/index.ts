@@ -15,6 +15,11 @@ export * from "./actions/types.ts";
 // Auth
 export * from "./auth/token-provider.ts";
 
+// Capability
+export * from "./capability/client.ts";
+export * from "./capability/http-client.ts";
+export * from "./capability/types.ts";
+
 // Core
 export * from "./core/context.ts";
 export * from "./core/events.ts";
