@@ -333,3 +333,113 @@ describe("invalid payloads never become NOT_FOUND", () => {
 		await expectPlatformError(() => createClient(transport).safety.preflightCheck("DOCK1"), "INVALID_RESPONSE");
 	});
 });
+
+describe("direct airport resolution error classification", () => {
+	it("404 falls back to the dock list and nickname resolution can succeed", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 404, body: undefined });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
+		transport.responses.push({
+			status: 200,
+			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true }),
+		});
+		const status = await createClient(transport).airport.getStatus("Test-01");
+		expect(status.name).toBe("Test-01");
+	});
+
+	it("PERMISSION_DENIED propagates and the dock list is never called", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 403, body: undefined });
+		const client = createClient(transport);
+		await expectPlatformError(() => client.airport.getStatus("Test-01"), "PERMISSION_DENIED");
+		expect(transport.calls.some((call) => call.url.includes("getDockListPageVo"))).toBe(false);
+	});
+
+	it("UPSTREAM_TIMEOUT propagates without fallback", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({
+			status: 504,
+			body: undefined,
+		});
+		const client = createClient(transport);
+		await expectPlatformError(() => client.airport.getStatus("Test-01"), "UPSTREAM_TIMEOUT");
+		expect(transport.calls.some((call) => call.url.includes("getDockListPageVo"))).toBe(false);
+	});
+
+	it("PLATFORM_UNAVAILABLE propagates without fallback", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 503, body: undefined });
+		const client = createClient(transport);
+		await expectPlatformError(() => client.airport.getStatus("Test-01"), "PLATFORM_UNAVAILABLE");
+		expect(transport.calls.some((call) => call.url.includes("getDockListPageVo"))).toBe(false);
+	});
+
+	it("an invalid response propagates without fallback", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 200, body: { code: 0, message: "success", data: null } });
+		const client = createClient(transport);
+		await expectPlatformError(() => client.airport.getStatus("Test-01"), "INVALID_RESPONSE");
+		expect(transport.calls.some((call) => call.url.includes("getDockListPageVo"))).toBe(false);
+	});
+
+	it("caller abort propagates as AbortError without fallback", async () => {
+		// A transport that aborts the direct request must surface AbortError to
+		// the caller; tryDirectAirportDetail must not convert it to NOT_FOUND.
+		const calls: string[] = [];
+		const abortingTransport = {
+			async request(options: { url: string }): Promise<never> {
+				calls.push(options.url);
+				throw new DOMException("The operation was aborted", "AbortError");
+			},
+		};
+		const client = new HttpPlatformClient({
+			baseUrl: "https://platform/",
+			tokenProvider: { getToken: async () => "tok-1" },
+			transport: abortingTransport,
+			workspaceId: "ws-1",
+			pageSize: 1,
+		});
+		try {
+			await client.airport.getStatus("Test-01");
+			expect.unreachable();
+		} catch (error) {
+			expect((error as DOMException).name).toBe("AbortError");
+		}
+		expect(calls.some((url) => url.includes("getDockListPageVo"))).toBe(false);
+	});
+
+	it("a direct hit on a non-dock device falls back to the name scan", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({ status: 200, body: envelope({ device_sn: "SN", type: 100, status: true }) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "DOCK1", deviceType: 3 }], 1, 1, 1) });
+		transport.responses.push({
+			status: 200,
+			body: envelope({ device_sn: "DOCK1", nickname: "Test-01", status: true }),
+		});
+		const status = await createClient(transport).airport.getStatus("Test-01");
+		expect(status.name).toBe("Test-01");
+	});
+});
+
+describe("business envelope never leaks upstream text", () => {
+	it("a non-zero business code with a sensitive message maps to a stable message", async () => {
+		const transport = new MockTransport();
+		transport.responses.push({
+			status: 200,
+			body: { code: 50012, message: "SQL failed password=secret token=abc" },
+		});
+		const client = createClient(transport);
+		try {
+			await client.drone.getStatus("nope");
+			expect.unreachable();
+		} catch (error) {
+			const err = error as PlatformError;
+			expect(err.code).toBe("UNKNOWN_ERROR");
+			expect(err.message).toBe("UAV platform request failed.");
+			expect(err.message).not.toContain("SQL");
+			expect(err.message).not.toContain("password");
+			expect(err.message).not.toContain("secret");
+			expect(err.message).not.toContain("token");
+		}
+	});
+});

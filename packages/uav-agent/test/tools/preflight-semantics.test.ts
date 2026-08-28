@@ -83,11 +83,11 @@ describe("preflight_check tool contract", () => {
 		expect(idleCheck?.informational).toBeUndefined();
 	});
 
-	it("PreflightCheck type cannot express informational=true with passed=true (scenario C)", () => {
-		// The contract guarantees coherence: informational checks are always
-		// emitted with passed=false by the client (the only producer). A
-		// compile-time guarantee is impossible here, so pin the producer rule
-		// on the type surface instead: PreflightCheck.informational is
+	it("pins the producer convention for informational checks", () => {
+		// The TS type does allow { passed: true, informational: true }; this test
+		// pins the producer convention instead: the client (the only producer)
+		// always emits informational checks with passed=false. A compile-time
+		// guarantee is impossible here, so PreflightCheck.informational is
 		// optional and documented as display-only. This test asserts the type
 		// shape via a value.
 		const check: PreflightCheck = { name: "x", passed: false, informational: true };

@@ -149,7 +149,7 @@ describe("HttpPlatformClient", () => {
 		}
 	});
 
-	it("maps non-zero business codes to UNKNOWN_ERROR with the platform message", async () => {
+	it("does not expose upstream business messages for unmapped business codes", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 200, body: { code: 50012, message: "设备不存在" } });
 		const client = createClient(transport);
@@ -158,7 +158,8 @@ describe("HttpPlatformClient", () => {
 			expect.unreachable();
 		} catch (error) {
 			expect((error as PlatformError).code).toBe("UNKNOWN_ERROR");
-			expect((error as PlatformError).message).toContain("设备不存在");
+			expect((error as PlatformError).message).toBe("UAV platform request failed.");
+			expect((error as PlatformError).message).not.toContain("设备不存在");
 		}
 	});
 
