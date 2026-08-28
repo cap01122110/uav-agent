@@ -30,6 +30,7 @@ function createClient(transport: MockTransport): HttpPlatformClient {
 		tokenProvider: { getToken: async () => "tok-1" },
 		transport,
 		workspaceId: "ws-1",
+		pageSize: 1,
 	});
 }
 
@@ -154,6 +155,64 @@ describe("airportHasActiveJob scans every page (via preflightCheck)", () => {
 		queueDirectPreflight(transport, [jobPage(1, 1, 1, [{ job_id: "J0" }])]);
 		await expectPlatformError(() => createClient(transport).safety.preflightCheck("DOCK1"), "INVALID_RESPONSE");
 	});
+
+	it("fails closed when a later page changes page_size", async () => {
+		const transport = new MockTransport();
+		queueDirectPreflight(transport, [
+			{ status: 200, body: listPage([{ job_id: "J0", status: 3 }], 1, 1, 2) },
+			{ status: 200, body: listPage([], 2, 2, 2) }, // server changed span mid-scan
+		]);
+		await expectPlatformError(() => createClient(transport).safety.preflightCheck("DOCK1"), "INVALID_RESPONSE");
+	});
+
+	it("fails closed when a later page changes total (up or down)", async () => {
+		for (const tail of [
+			{ status: 200, body: listPage([], 2, 1, 149) },
+			{ status: 200, body: listPage([{ job_id: "J1", status: 1 }], 2, 1, 200) },
+		]) {
+			const transport = new MockTransport();
+			queueDirectPreflight(transport, [
+				{ status: 200, body: listPage([{ job_id: "J0", status: 3 }], 1, 1, 150) },
+				tail,
+			]);
+			await expectPlatformError(() => createClient(transport).safety.preflightCheck("DOCK1"), "INVALID_RESPONSE");
+		}
+	});
+});
+
+describe("job status strictness (unknown is never inactive)", () => {
+	it("treats known running (1) and paused (6) as active and blocks the check", async () => {
+		for (const status of [1, 6]) {
+			const transport = new MockTransport();
+			queueDirectPreflight(transport, [jobPage(1, 1, 1, [{ job_id: "J1", status }])]);
+			const result = await createClient(transport).safety.preflightCheck("DOCK1");
+			expect(result.passed).toBe(false);
+		}
+	});
+
+	it("treats known non-active statuses (0, 2, 3, 4, 5) as inactive and passes", async () => {
+		for (const status of [0, 2, 3, 4, 5]) {
+			const transport = new MockTransport();
+			queueDirectPreflight(transport, [jobPage(1, 1, 1, [{ job_id: "J1", status }])]);
+			const result = await createClient(transport).safety.preflightCheck("DOCK1");
+			expect(result.passed).toBe(true);
+		}
+	});
+
+	it("throws INVALID_RESPONSE for an unknown integer status", async () => {
+		for (const status of [7, 99, 1.5]) {
+			const transport = new MockTransport();
+			queueDirectPreflight(transport, [jobPage(1, 1, 1, [{ job_id: "J1", status }])]);
+			await expectPlatformError(() => createClient(transport).safety.preflightCheck("DOCK1"), "INVALID_RESPONSE");
+		}
+	});
+
+	it("accepts a numeric string status the same as a number (wire contract)", async () => {
+		const transport = new MockTransport();
+		queueDirectPreflight(transport, [jobPage(1, 1, 1, [{ job_id: "J1", status: "6" }])]);
+		const result = await createClient(transport).safety.preflightCheck("DOCK1");
+		expect(result.passed).toBe(false);
+	});
 });
 
 describe("strict envelope validation", () => {
@@ -234,7 +293,7 @@ describe("invalid payloads never become NOT_FOUND", () => {
 
 	it("MISSION_NOT_FOUND still applies after a complete, trusted scan", async () => {
 		const transport = new MockTransport();
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		await expectPlatformError(() => createClient(transport).mission.getStatus("J1"), "MISSION_NOT_FOUND");
 	});
 

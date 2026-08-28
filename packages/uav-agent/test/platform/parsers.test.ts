@@ -53,6 +53,13 @@ describe("parseAirportStatus", () => {
 		expectInvalidResponse(() => parseAirportStatus({ nickname: "A" }, "A"));
 		expectInvalidResponse(() => parseAirportStatus({ status: "unrecognizable" }, "A"));
 	});
+
+	it("throws INVALID_RESPONSE for a malformed numeric online status (never online=true)", () => {
+		expectInvalidResponse(() => parseAirportStatus({ status: 99 }, "A"));
+		expectInvalidResponse(() => parseAirportStatus({ status: -1 }, "A"));
+		expectInvalidResponse(() => parseAirportStatus({ status: 2 }, "A"));
+		expectInvalidResponse(() => parseAirportStatus({ status: 1.5 }, "A"));
+	});
 });
 
 describe("parseDroneStatus", () => {
@@ -92,6 +99,8 @@ describe("parseDroneStatus", () => {
 		expectInvalidResponse(() => parseDroneStatus({}, "SN"));
 		expectInvalidResponse(() => parseDroneStatus({ flying: true }, "SN"));
 		expectInvalidResponse(() => parseDroneStatus({ status: "weird" }, "SN"));
+		expectInvalidResponse(() => parseDroneStatus({ status: -1 }, "SN"));
+		expectInvalidResponse(() => parseDroneStatus({ status: 99 }, "SN"));
 	});
 
 	it("throws INVALID_RESPONSE for a non-record payload", () => {

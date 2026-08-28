@@ -16,7 +16,8 @@
 
 import type { TokenProvider } from "../auth/token-provider.ts";
 import { PlatformError, type PlatformErrorCode } from "./errors.ts";
-import { collectPagedList, iteratePagedList, type PagedListPayload, requirePagedList } from "./pagination.ts";
+import { ACTIVE_JOB_STATUSES, isKnownJobStatus } from "./job-status.ts";
+import { collectPagedList, iteratePagedList, type PagedListPayload, validatePagedList } from "./pagination.ts";
 import { deviceOnlineStatus, parseAirportStatus, parseDroneStatus, parseMissionStatus } from "./parsers.ts";
 import type { HttpTransport } from "./transport.ts";
 import { FetchHttpTransport } from "./transport.ts";
@@ -84,18 +85,14 @@ export interface UavPlatformClientOptions {
 	tokenProvider: TokenProvider;
 	/** Workspace id required by the real platform's REST API. */
 	workspaceId?: string;
+	/** Page size requested for list scans. Defaults to 100. */
+	pageSize?: number;
 	timeoutMs?: number;
 	transport?: HttpTransport;
 	endpoints?: Partial<PlatformEndpoints>;
 }
 
 type NotFoundCode = "AIRPORT_NOT_FOUND" | "DRONE_NOT_FOUND" | "MISSION_NOT_FOUND";
-
-/** Server-side page size for list scans; continuation follows pagination, not this value. */
-const PAGE_SIZE = 100;
-
-/** Wayline job statuses that mean the dock is busy: 1 = running, 6 = paused. */
-const ACTIVE_JOB_STATUSES = new Set([1, 6]);
 
 /** Job fields matched against the requested mission id. */
 const JOB_MATCH_FIELDS = ["job_id", "jobId", "job_name", "jobName"] as const;
@@ -111,6 +108,7 @@ export class HttpPlatformClient implements UavPlatformClient {
 	private readonly transport: HttpTransport;
 	private readonly endpoints: PlatformEndpoints;
 	private readonly workspaceId: string | undefined;
+	private readonly pageSize: number;
 	private cachedWorkspaceId: string | undefined;
 
 	constructor(options: UavPlatformClientOptions) {
@@ -119,6 +117,7 @@ export class HttpPlatformClient implements UavPlatformClient {
 		this.transport = options.transport ?? new FetchHttpTransport({ timeoutMs: options.timeoutMs });
 		this.endpoints = { ...DEFAULT_ENDPOINTS, ...options.endpoints };
 		this.workspaceId = options.workspaceId;
+		this.pageSize = options.pageSize ?? 100;
 
 		this.airport = {
 			getStatus: (airportId, signal) => this.getAirportStatus(airportId, signal),
@@ -168,12 +167,13 @@ export class HttpPlatformClient implements UavPlatformClient {
 		let match: Record<string, unknown> | undefined;
 		const found = await iteratePagedList(
 			"jobList",
+			this.pageSize,
 			(page) =>
 				this.requestPagedList(
 					"jobList",
 					path,
 					"MISSION_NOT_FOUND",
-					{ page_num: page, page_size: PAGE_SIZE, workspace_id: workspaceId, job_id: missionId },
+					{ page_num: page, page_size: this.pageSize, workspace_id: workspaceId, job_id: missionId },
 					signal,
 				),
 			(item) => {
@@ -268,12 +268,13 @@ export class HttpPlatformClient implements UavPlatformClient {
 		const path = this.endpoints.jobList.replace("{workspace_id}", encodeURIComponent(workspaceId));
 		return iteratePagedList(
 			"jobList",
+			this.pageSize,
 			(page) =>
 				this.requestPagedList(
 					"jobList",
 					path,
 					"MISSION_NOT_FOUND",
-					{ page_num: page, page_size: PAGE_SIZE, workspace_id: workspaceId, sn: dockSn },
+					{ page_num: page, page_size: this.pageSize, workspace_id: workspaceId, sn: dockSn },
 					signal,
 				),
 			(item) => {
@@ -281,8 +282,9 @@ export class HttpPlatformClient implements UavPlatformClient {
 				const raw = record.status;
 				const status =
 					typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
-				// An unreadable job status is unknown, not inactive.
-				if (!Number.isFinite(status)) throw invalidResponse("jobList.data.list[].status");
+				// A job status must be a known whole number (0-6); anything else
+				// (7, 99, 1.5, NaN) is unknown, not inactive.
+				if (!isKnownJobStatus(status)) throw invalidResponse("jobList.data.list[].status");
 				return ACTIVE_JOB_STATUSES.has(status);
 			},
 		);
@@ -356,12 +358,12 @@ export class HttpPlatformClient implements UavPlatformClient {
 	private async listAirportDocks(signal?: AbortSignal): Promise<Array<{ deviceSn: string; modeCode?: number }>> {
 		const workspaceId = await this.resolveWorkspace(signal);
 		const path = this.endpoints.airportList.replace("{workspace_id}", encodeURIComponent(workspaceId));
-		const items = await collectPagedList("dockList", (page) =>
+		const items = await collectPagedList("dockList", this.pageSize, (page) =>
 			this.requestPagedList(
 				"dockList",
 				path,
 				"AIRPORT_NOT_FOUND",
-				{ page_num: page, page_size: PAGE_SIZE, workspace_id: workspaceId },
+				{ page_num: page, page_size: this.pageSize, workspace_id: workspaceId },
 				signal,
 			),
 		);
@@ -415,7 +417,7 @@ export class HttpPlatformClient implements UavPlatformClient {
 			notFoundCode,
 			body,
 			signal,
-			validateData: (data) => requirePagedList(data, context),
+			validateData: (data) => validatePagedList(data, context, this.pageSize),
 		});
 	}
 
@@ -447,12 +449,12 @@ export class HttpPlatformClient implements UavPlatformClient {
 
 	/** Return the first workspace this token can enter, preferring joined ones. */
 	private async resolveWorkspaceFromList(signal?: AbortSignal): Promise<string | undefined> {
-		const items = await collectPagedList("workspaceList", (page) =>
+		const items = await collectPagedList("workspaceList", this.pageSize, (page) =>
 			this.requestPagedList(
 				"workspaceList",
 				this.endpoints.workspaceList,
 				"AIRPORT_NOT_FOUND",
-				{ page_num: page, page_size: PAGE_SIZE, region_code: "" },
+				{ page_num: page, page_size: this.pageSize, region_code: "" },
 				signal,
 			),
 		);

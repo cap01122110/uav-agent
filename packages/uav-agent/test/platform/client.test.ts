@@ -9,6 +9,7 @@ function createClient(transport: MockTransport, token = "tok-1"): HttpPlatformCl
 		tokenProvider: { getToken: async () => token },
 		transport,
 		workspaceId: "ws-1",
+		pageSize: 1,
 	});
 }
 
@@ -24,7 +25,7 @@ describe("HttpPlatformClient", () => {
 					{ deviceSn: "7CACN870010SVT", deviceType: 174, deviceName: "DJI RC PLUS 2" },
 				],
 				1,
-				2,
+				100,
 				2,
 			),
 		});
@@ -42,7 +43,13 @@ describe("HttpPlatformClient", () => {
 		});
 		// Second dock detail fails; must not break the nickname lookup.
 		transport.responses.push({ status: 404, body: undefined });
-		const client = createClient(transport);
+		const client = new HttpPlatformClient({
+			baseUrl: "https://platform/",
+			tokenProvider: { getToken: async () => "tok-1" },
+			transport,
+			workspaceId: "ws-1",
+			pageSize: 100,
+		});
 
 		const status = await client.airport.getStatus("Test-01");
 		expect(status.airportId).toBe("Test-01");
@@ -108,7 +115,7 @@ describe("HttpPlatformClient", () => {
 	it("returns AIRPORT_NOT_FOUND when the workspace has no docks", async () => {
 		const transport = new MockTransport();
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		const client = createClient(transport);
 		try {
 			await client.airport.getStatus("Test-01");
@@ -197,7 +204,7 @@ describe("HttpPlatformClient", () => {
 			status: 200,
 			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		transport.responses.push({
 			status: 200,
 			body: envelope({ device_sn: "DRONE1", status: true, device_name: "Matrice 4TD" }),
@@ -226,7 +233,7 @@ describe("HttpPlatformClient", () => {
 			status: 200,
 			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: 0 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: false }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
@@ -281,7 +288,7 @@ describe("HttpPlatformClient", () => {
 			status: 200,
 			body: listPage([{ deviceSn: "DOCK1", deviceType: 3, modeCode: -1 }], 1, 1, 1),
 		});
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "DRONE1", status: true }) });
 		const client = createClient(transport);
 		const result = await client.safety.preflightCheck("Test-01");
@@ -319,12 +326,13 @@ describe("HttpPlatformClient", () => {
 
 	it("throws INVALID_REQUEST when no workspace can be resolved", async () => {
 		const transport = new MockTransport();
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
-		transport.responses.push({ status: 200, body: listPage([], 1, 100, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
+		transport.responses.push({ status: 200, body: listPage([], 1, 1, 0) });
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
 			tokenProvider: { getToken: async () => "tok" },
 			transport,
+			pageSize: 1,
 		});
 		try {
 			await client.airport.getStatus("A");
@@ -349,12 +357,13 @@ describe("HttpPlatformClient", () => {
 			),
 		});
 		transport.responses.push({ status: 404, body: undefined });
-		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "A", deviceType: 3 }], 1, 1, 1) });
+		transport.responses.push({ status: 200, body: listPage([{ deviceSn: "A", deviceType: 3 }], 1, 2, 1) });
 		transport.responses.push({ status: 200, body: envelope({ device_sn: "A", nickname: "A", status: true }) });
 		const client = new HttpPlatformClient({
 			baseUrl: "https://platform",
 			tokenProvider: { getToken: async () => "tok" },
 			transport,
+			pageSize: 2,
 		});
 		const status = await client.airport.getStatus("A");
 		expect(status.airportId).toBe("A");

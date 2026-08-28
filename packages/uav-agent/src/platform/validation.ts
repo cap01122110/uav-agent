@@ -66,13 +66,19 @@ export function requireEnvelopeCode(record: Record<string, unknown>, context: st
 
 /**
  * Coerce one wire boolean (true/false, 1/0, "true"/"false", "online"/"offline",
- * ...). Returns undefined when the value is absent or unrecognizable - the
- * caller decides whether that is allowed. Undefined must never be turned into
- * `false` for real-time device state.
+ * ...). Numeric wire values follow the 0/1 contract only: any other number
+ * (2, -1, 1.5, NaN, Infinity) is unrecognizable and returns undefined, so a
+ * malformed status can never read as a safe online=true. The caller decides
+ * whether undefined is allowed; it must never be turned into `false` for
+ * real-time device state.
  */
 export function asWireBoolean(value: unknown): boolean | undefined {
 	if (typeof value === "boolean") return value;
-	if (typeof value === "number") return value !== 0;
+	if (typeof value === "number") {
+		if (value === 0) return false;
+		if (value === 1) return true;
+		return undefined;
+	}
 	if (typeof value === "string") {
 		const normalized = value.toLowerCase();
 		if (normalized === "true" || normalized === "1" || normalized === "online" || normalized === "running") {
