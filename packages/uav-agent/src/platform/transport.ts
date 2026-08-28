@@ -8,9 +8,12 @@
  * - An already-aborted signal never issues a request.
  * - The timeout covers the full request including response body reads.
  * - Timeout values must be finite positive numbers.
+ * - Public error messages are stable and never embed the response body,
+ *   upstream text, credentials or stack traces; the raw body is discarded.
  */
 
 import { randomUUID } from "node:crypto";
+import { httpErrorMessage } from "./error-message.ts";
 import { isRetryableStatus, mapHttpStatus, PlatformError, type PlatformErrorCode } from "./errors.ts";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -94,7 +97,7 @@ export class FetchHttpTransport implements HttpTransport {
 			}
 			if (timedOut) {
 				throw new PlatformError(
-					{ code: "UPSTREAM_TIMEOUT", message: `Request timed out after ${timeoutMs}ms`, retryable: true },
+					{ code: "UPSTREAM_TIMEOUT", message: "UAV platform request timed out.", retryable: true },
 					{ requestId, cause: error },
 				);
 			}
@@ -102,7 +105,7 @@ export class FetchHttpTransport implements HttpTransport {
 				throw error;
 			}
 			throw new PlatformError(
-				{ code: "PLATFORM_UNAVAILABLE", message: "Platform unreachable", retryable: true },
+				{ code: "PLATFORM_UNAVAILABLE", message: "UAV platform is unavailable.", retryable: true },
 				{ requestId, cause: error },
 			);
 		} finally {
@@ -128,15 +131,15 @@ function serializeBody(body: unknown): string | undefined {
 	return JSON.stringify(body);
 }
 
-async function createHttpError(response: Response, requestId: string): Promise<PlatformError> {
+/**
+ * Build the error for a non-2xx HTTP response. The public message is a stable
+ * per-status text; the response body (which may embed credentials, SQL or
+ * stack traces) is deliberately never read or included.
+ */
+function createHttpError(response: Response, requestId: string): PlatformError {
 	const code: PlatformErrorCode = mapHttpStatus(response.status) ?? "UNKNOWN_ERROR";
-	const detail = await readBodyText(response);
-	const message =
-		detail.length > 0
-			? `Platform error ${response.status}: ${truncate(detail)}`
-			: `Platform error ${response.status}`;
 	return new PlatformError(
-		{ code, message, retryable: isRetryableStatus(response.status) },
+		{ code, message: httpErrorMessage(response.status), retryable: isRetryableStatus(response.status) },
 		{ status: response.status, requestId, cause: new Error(`HTTP ${response.status}`) },
 	);
 }
@@ -148,22 +151,12 @@ async function parseResponse<T>(response: Response, requestId: string): Promise<
 	}
 	try {
 		return JSON.parse(text) as T;
-	} catch (error) {
+	} catch {
+		// HTTP succeeded but the body is not valid JSON: the upstream contract
+		// is broken. The raw body is never included in the public message.
 		throw new PlatformError(
-			{ code: "UNKNOWN_ERROR", message: "Platform returned invalid JSON", retryable: false },
-			{ status: response.status, requestId, cause: error },
+			{ code: "INVALID_RESPONSE", message: "UAV platform returned an invalid response.", retryable: false },
+			{ status: response.status, requestId },
 		);
 	}
-}
-
-async function readBodyText(response: Response): Promise<string> {
-	try {
-		return await response.text();
-	} catch {
-		return "";
-	}
-}
-
-function truncate(text: string, maxLength = 500): string {
-	return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }

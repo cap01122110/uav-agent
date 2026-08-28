@@ -50,6 +50,66 @@ describe("FetchHttpTransport", () => {
 			expect(error).toBeInstanceOf(PlatformError);
 			expect((error as PlatformError).code).toBe("PERMISSION_DENIED");
 			expect((error as PlatformError).retryable).toBe(false);
+			expect((error as PlatformError).message).toBe("UAV platform permission denied.");
+		}
+	});
+
+	it("never leaks the response body into the public message", async () => {
+		const leakyBody =
+			'{"message":"SQL failed password=abc123","stackTrace":"at org.springframework...","token":"eyJsecret"}';
+		stubFetch(async () => new Response(leakyBody, { status: 500 }));
+		const transport = new FetchHttpTransport();
+		try {
+			await transport.request({ method: "GET", url: "https://platform/x" });
+			expect.unreachable();
+		} catch (error) {
+			expect((error as PlatformError).code).toBe("PLATFORM_UNAVAILABLE");
+			expect((error as PlatformError).message).toBe("UAV platform is unavailable.");
+			expect((error as PlatformError).message).not.toContain("password");
+			expect((error as PlatformError).message).not.toContain("token");
+			expect((error as PlatformError).message).not.toContain("stackTrace");
+			expect((error as PlatformError).message).not.toContain("SQL");
+			expect((error as PlatformError).status).toBe(500);
+		}
+	});
+
+	it("maps a 403 body with credentials to PERMISSION_DENIED without leaking", async () => {
+		stubFetch(async () => new Response('{"error":"unauthorized token=abc password=hunter2"}', { status: 403 }));
+		const transport = new FetchHttpTransport();
+		try {
+			await transport.request({ method: "GET", url: "https://platform/x" });
+			expect.unreachable();
+		} catch (error) {
+			expect((error as PlatformError).code).toBe("PERMISSION_DENIED");
+			expect((error as PlatformError).message).not.toContain("abc");
+			expect((error as PlatformError).message).not.toContain("hunter2");
+		}
+	});
+
+	it("maps invalid JSON on HTTP 200 to INVALID_RESPONSE without the raw body", async () => {
+		stubFetch(async () => new Response("this is not json password=secret", { status: 200 }));
+		const transport = new FetchHttpTransport();
+		try {
+			await transport.request({ method: "GET", url: "https://platform/x" });
+			expect.unreachable();
+		} catch (error) {
+			expect((error as PlatformError).code).toBe("INVALID_RESPONSE");
+			expect((error as PlatformError).message).toBe("UAV platform returned an invalid response.");
+			expect((error as PlatformError).message).not.toContain("not json");
+			expect((error as PlatformError).message).not.toContain("secret");
+		}
+	});
+
+	it("keeps HTTP 404 status without leaking the response body", async () => {
+		stubFetch(async () => new Response('{"message":"no such airport token=abc"}', { status: 404 }));
+		const transport = new FetchHttpTransport();
+		try {
+			await transport.request({ method: "GET", url: "https://platform/x" });
+			expect.unreachable();
+		} catch (error) {
+			expect((error as PlatformError).status).toBe(404);
+			expect((error as PlatformError).message).toBe("UAV platform resource not found.");
+			expect((error as PlatformError).message).not.toContain("abc");
 		}
 	});
 
@@ -96,6 +156,34 @@ describe("FetchHttpTransport", () => {
 			expect(error).toBeInstanceOf(PlatformError);
 			expect((error as PlatformError).code).toBe("UPSTREAM_TIMEOUT");
 			expect((error as PlatformError).retryable).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("covers a body read that stalls after headers arrive (timeout during response.text)", async () => {
+		vi.useFakeTimers();
+		try {
+			// fetch resolves with a Response whose body stream never delivers data;
+			// only an abort cancels the read. The timeout must still fire.
+			stubFetch(async (_url, init) => {
+				const stream = new ReadableStream<Uint8Array>({
+					start(controller) {
+						init?.signal?.addEventListener("abort", () =>
+							controller.error(new DOMException("aborted", "AbortError")),
+						);
+					},
+				});
+				return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+			});
+			const transport = new FetchHttpTransport({ timeoutMs: 100 });
+			const promise = transport.request({ method: "GET", url: "https://platform/x" });
+			const errorPromise = promise.catch((error: unknown) => error);
+			await vi.advanceTimersByTimeAsync(200);
+			const error = await errorPromise;
+			expect(error).toBeInstanceOf(PlatformError);
+			expect((error as PlatformError).code).toBe("UPSTREAM_TIMEOUT");
+			expect((error as PlatformError).message).toBe("UAV platform request timed out.");
 		} finally {
 			vi.useRealTimers();
 		}

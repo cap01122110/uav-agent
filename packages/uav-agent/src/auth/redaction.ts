@@ -41,6 +41,8 @@ export function redactSecrets(detail: string): string {
 		detail
 			// JSON: "key": "value"
 			.replace(new RegExp(`("(?:${KEY_ALTERNATION})"\\s*:\\s*")[^"]*(")`, "gi"), "$1[REDACTED]$2")
+			// Quoted key=value: key="..." / key='...' (whole value incl. spaces)
+			.replace(new RegExp(`((?:${KEY_ALTERNATION})\\s*=\\s*)(["'])(.*?)\\2`, "gis"), "$1$2[REDACTED]$2")
 			// key=value (optionally quoted, terminated by & ; whitespace)
 			.replace(new RegExp(`((?:${KEY_ALTERNATION})\\s*=\\s*["']?)[^"'&;\\s]+`, "gi"), "$1[REDACTED]")
 			// Header-style: Key: value (colon followed by whitespace only)

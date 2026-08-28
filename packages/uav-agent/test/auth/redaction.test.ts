@@ -19,6 +19,26 @@ describe("redactSecrets", () => {
 		expect(out).toContain("password=[REDACTED]");
 	});
 
+	it("redacts quoted key=value pairs in full, including inner spaces", () => {
+		const out = redactSecrets('password="abc def ghi" client_secret=\'foo bar baz\' token="tt"');
+		expect(out).not.toContain("abc");
+		expect(out).not.toContain("def");
+		expect(out).not.toContain("ghi");
+		expect(out).not.toContain("foo");
+		expect(out).not.toContain("bar");
+		expect(out).not.toContain("baz");
+		expect(out).not.toContain("tt");
+		expect(out).toContain('password="[REDACTED]"');
+		expect(out).toContain("client_secret='[REDACTED]'");
+		expect(out).toContain('token="[REDACTED]"');
+	});
+
+	it("keeps ordinary text that merely mentions a sensitive key intact", () => {
+		const out = redactSecrets("note: the word password is not itself a secret here");
+		expect(out).toContain("the word password");
+		expect(out).not.toContain("[REDACTED]");
+	});
+
 	it("redacts header-style Authorization: Bearer and cookies", () => {
 		const out = redactSecrets(
 			"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.def\nCookie: session=SECRET123\nx-auth-token: tok-9",

@@ -125,7 +125,10 @@ export class ClientCredentialsTokenSource implements TokenSource {
 				);
 			}
 
-			const payload = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
+			const payload = await readJsonResponse<{ access_token?: unknown; expires_in?: unknown }>(
+				response,
+				"Token endpoint returned an invalid response",
+			);
 			if (typeof payload.access_token !== "string" || payload.access_token.length === 0) {
 				throw new PlatformError({
 					code: "INVALID_RESPONSE",
@@ -257,7 +260,10 @@ export class PasswordTokenSource implements TokenSource {
 				);
 			}
 
-			const payload = (await response.json()) as { code?: unknown; message?: unknown; data?: unknown };
+			const payload = await readJsonResponse<{ code?: unknown; message?: unknown; data?: unknown }>(
+				response,
+				"Login endpoint returned an invalid response",
+			);
 			if (payload.code !== 0) {
 				// The upstream login message is untrusted text; never expose it.
 				throw new PlatformError({
@@ -298,10 +304,27 @@ export class PasswordTokenSource implements TokenSource {
 	}
 }
 
+/** Whether an error is a caller/transport abort (DOMException AbortError). */
+function isAbortError(error: unknown): boolean {
+	return error instanceof DOMException && error.name === "AbortError";
+}
+
+/** Read the raw body for diagnostics, but never swallow a caller abort. */
 async function readBodyText(response: Response): Promise<string> {
 	try {
 		return await response.text();
-	} catch {
+	} catch (error) {
+		if (isAbortError(error)) throw error;
 		return "";
+	}
+}
+
+/** Parse a JSON response; a contract violation maps to INVALID_RESPONSE. */
+async function readJsonResponse<T>(response: Response, publicMessage: string): Promise<T> {
+	try {
+		return JSON.parse(await response.text()) as T;
+	} catch (error) {
+		if (isAbortError(error)) throw error;
+		throw new PlatformError({ code: "INVALID_RESPONSE", message: publicMessage, retryable: false }, { cause: error });
 	}
 }

@@ -230,6 +230,66 @@ describe("ClientCredentialsTokenSource", () => {
 			vi.unstubAllGlobals();
 		}
 	});
+
+	it("maps invalid JSON on HTTP 200 to INVALID_RESPONSE, not PLATFORM_UNAVAILABLE", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{broken-json token=secret", { status: 200 })),
+		);
+		try {
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				const err = error as PlatformError;
+				expect(err.code).toBe("INVALID_RESPONSE");
+				expect(err.message).toBe("Token endpoint returned an invalid response");
+				expect(err.message).not.toContain("broken-json");
+				expect(err.message).not.toContain("secret");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("propagates a caller abort during an error-response body read as AbortError", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+				const stream = new ReadableStream<Uint8Array>({
+					start(controller) {
+						init?.signal?.addEventListener("abort", () =>
+							controller.error(new DOMException("aborted", "AbortError")),
+						);
+					},
+				});
+				// 401 with a body that never delivers: abort must not become PERMISSION_DENIED.
+				return new Response(stream, { status: 401 });
+			}),
+		);
+		try {
+			const controller = new AbortController();
+			const source = new ClientCredentialsTokenSource({
+				tokenUrl: "https://platform/oauth/token",
+				clientId: "client-1",
+				clientSecret: "super-secret",
+				timeoutMs: 10_000,
+			});
+			const promise = source.fetchToken(controller.signal);
+			const errorPromise = promise.catch((error: unknown) => error);
+			controller.abort();
+			const error = await errorPromise;
+			expect((error as DOMException).name).toBe("AbortError");
+			expect(error).not.toBeInstanceOf(PlatformError);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
 });
 
 describe("PasswordTokenSource", () => {
@@ -397,6 +457,66 @@ describe("PasswordTokenSource", () => {
 			} catch (error) {
 				expect((error as PlatformError).code).toBe("INVALID_RESPONSE");
 			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("maps invalid JSON on HTTP 200 to INVALID_RESPONSE, not PLATFORM_UNAVAILABLE", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{broken-json token=secret", { status: 200 })),
+		);
+		try {
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+			});
+			try {
+				await source.fetchToken();
+				expect.unreachable();
+			} catch (error) {
+				const err = error as PlatformError;
+				expect(err.code).toBe("INVALID_RESPONSE");
+				expect(err.message).toBe("Login endpoint returned an invalid response");
+				expect(err.message).not.toContain("broken-json");
+				expect(err.message).not.toContain("secret");
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("propagates a caller abort during an error-response body read as AbortError", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+				const stream = new ReadableStream<Uint8Array>({
+					start(controller) {
+						init?.signal?.addEventListener("abort", () =>
+							controller.error(new DOMException("aborted", "AbortError")),
+						);
+					},
+				});
+				// 401 with a body that never delivers: abort must not become PERMISSION_DENIED.
+				return new Response(stream, { status: 401 });
+			}),
+		);
+		try {
+			const controller = new AbortController();
+			const source = new PasswordTokenSource({
+				baseUrl: "https://platform",
+				username: "svc",
+				password: "hunter2",
+				timeoutMs: 10_000,
+			});
+			const promise = source.fetchToken(controller.signal);
+			const errorPromise = promise.catch((error: unknown) => error);
+			controller.abort();
+			const error = await errorPromise;
+			expect((error as DOMException).name).toBe("AbortError");
+			expect(error).not.toBeInstanceOf(PlatformError);
 		} finally {
 			vi.unstubAllGlobals();
 		}
